@@ -1,0 +1,17 @@
+# Build output (build.sh writes dist/; release files go to GitHub Releases)
+dist/
+dist-native/
+build/
+*.ffpfsc
+*.zip
+
+# Downloaded on first use by tools/make_dds.ps1
+tools/texconv.exe
+
+# Editors and OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini

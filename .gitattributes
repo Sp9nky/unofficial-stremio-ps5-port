@@ -1,0 +1,10 @@
+# Text files are stored with LF; shell scripts must stay LF to run on Linux/WSL.
+* text=auto eol=lf
+*.ps1 text eol=crlf
+
+# Binary assets
+*.png binary
+*.jpg binary
+*.dds binary
+*.ttf binary
+*.at9 binary

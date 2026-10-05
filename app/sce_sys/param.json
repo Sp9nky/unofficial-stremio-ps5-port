@@ -1,0 +1,31 @@
+{
+  "ageLevel": {
+    "default": 0
+  },
+  "applicationCategoryType": 65536,
+  "applicationDrmType": "free",
+  "attribute": 0,
+  "attribute2": 0,
+  "attribute3": 0,
+  "conceptId": "77711",
+  "contentBadgeType": 2,
+  "contentId": "UP9000-PPSA77711_00-STREMIOPS5000001",
+  "contentVersion": "01.000.000",
+  "downloadDataSize": 256,
+  "localizedParameters": {
+    "defaultLanguage": "en-US",
+    "en-US": {
+      "titleName": "Stremio"
+    }
+  },
+  "masterVersion": "01.00",
+  "pubtools": {
+    "creationDate": "2026-10-04 00:00:00",
+    "loudnessSnd0": "-28.00",
+    "toolVersion": "2.00"
+  },
+  "requiredSystemSoftwareVersion": "0x0000000000000000",
+  "sdkVersion": "0x0000000000000000",
+  "titleId": "PPSA77711",
+  "versionFileUri": ""
+}
