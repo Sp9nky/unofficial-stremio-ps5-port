@@ -15,6 +15,8 @@ affiliated with or endorsed by Stremio.
 | `native/dlmalloc.c` | Doug Lea's malloc 2.8.6 | MIT-0 |
 | `third_party/json.hpp` | [nlohmann/json](https://github.com/nlohmann/json) 3.11.3 (Niels Lohmann) | MIT |
 | `third_party/stb_image.h` | [stb_image](https://github.com/nothings/stb) 2.30 (Sean Barrett) | MIT / public domain |
+| `src/hwdec_ps5.cpp` (hardware video decoding), `native/stubs/videodec2.c` | ported from [Nuvio PS5](https://github.com/theghostonline/Nuvio-PS5) (`app/engine/media/src/evo_vdec_native.c`, Husam Osman, itself built on an open-source GPL-3.0 PS5 media player); the libSceVideodec2 structures and call sequence come from there and from [ProsperoLight](https://github.com/blackbearreloaded/ProsperoLight) (BlackBearReloaded) and [SharpProspero](https://github.com/SvenGDK/SharpProspero) (SvenGDK) | GPL-3.0-or-later |
+| `src/netstream.cpp` (several connections for big files) | the approach and sizes of Nuvio PS5's `evo_parallel_io.c` | GPL-3.0-or-later |
 | `src/app_detail.cpp` (torrent stream set-up) | follows the behaviour of `createTorrent` in [stremio-video](https://github.com/Stremio/stremio-video) (Stremio) | MIT |
 
 ## Linked into the app (downloaded at build time, not included here)
@@ -32,6 +34,7 @@ license:
 | [LLVM](https://llvm.org/) libc++, libc++abi, libunwind | Apache-2.0 WITH LLVM-exception |
 | [SDL2](https://www.libsdl.org/) and libsamplerate | zlib; BSD-2-Clause |
 | [RmlUi](https://github.com/mikke89/RmlUi) | MIT |
+| [dht](https://github.com/jech/dht) (Juliusz Chroboczek): the built-in torrent engine's DHT | MIT |
 | [FFmpeg](https://ffmpeg.org/) (libavformat, libavcodec, libavutil, libswresample, libswscale), built with `--enable-gpl --enable-version3` | GPL-3.0-or-later |
 | [x264](https://www.videolan.org/developers/x264.html) (pulled in by that FFmpeg build) | GPL-2.0-or-later |
 | [libcurl](https://curl.se/) | curl license (MIT/X derivative) |
@@ -77,9 +80,10 @@ index (`app/licenses/README.txt`). The build copies that folder,
 
 The app talks to Stremio's public services (`api.strem.io` for the account,
 library and addon collection, `link.stremio.com` for sign-in) and to the addons
-the user installed. Streams play through a Stremio streaming server
+the user installed. Streams play directly on the console (the built-in
+torrent engine, or the stream's own link); a Stremio streaming server
 ([Stremio/server-docker](https://github.com/Stremio/server-docker), GPL-2.0)
-that the user runs. On the console it relies on
+is optional. On the console it relies on
 [ShadowMountPlus](https://github.com/drakmor/ShadowMountPlus) (drakmor),
 [etaHEN](https://github.com/etaHEN/etaHEN) and
 [kstuff](https://github.com/EchoStretch/kstuff); none of them is included.
