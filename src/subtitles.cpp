@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdlib>
 
+#include "bidi.h"
 #include "util.h"
 
 // "00:01:02,345" / "01:02.345" / "0:01:02.34" -> seconds; -1 if not a time.
@@ -101,7 +102,8 @@ std::string subtitle_text_to_rml(const std::string& in) {
 	// Collapse leading/trailing breaks.
 	while (starts_with(out, "<br/>")) out = out.substr(5);
 	while (ends_with(out, "<br/>")) out = out.substr(0, out.size() - 5);
-	return out;
+	// Arabic / Hebrew lines into display order, letters joined (bidi.h).
+	return bidi_visual_rml(out);
 }
 
 static std::vector<std::string> lines_of(const std::string& text) {

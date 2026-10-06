@@ -239,6 +239,10 @@ int main(int argc, char** argv) {
 	for (auto* f : fonts)
 		if (!Rml::LoadFontFace(base + "/fonts/" + f)) dlog("can't load font %s", f);
 	Rml::LoadFontFace(base + "/fonts/NotoEmoji-VariableFont_wght.ttf", true);
+	// Arabic letters (Noto Sans has none: white boxes, issue #1), with the
+	// joined forms bidi.h produces. Fallbacks: used only for missing glyphs.
+	for (auto* f : {"NotoNaskhArabicUI-Regular.ttf", "NotoNaskhArabicUI-Bold.ttf"})
+		if (!Rml::LoadFontFace(base + "/fonts/" + f, true)) dlog("can't load font %s", f);
 
 	Rml::Context* ctx = Rml::CreateContext("main", Rml::Vector2i(kWidth, kHeight));
 	if (!ctx) {
