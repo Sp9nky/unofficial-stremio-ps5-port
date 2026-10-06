@@ -12,6 +12,7 @@ ps5-native-app-boilerplate (BlackBear-     GPL-3.0-or-later                ../LI
   FFmpeg build, MkPFS, SharpProspero
 ps5-payload-sdk libc (FreeBSD parts)       BSD                             FreeBSD.txt
 Kodi port for PS5 (Team Kodi, VivaLaVent)  GPL-2.0-or-later                GPL-2.0.txt
+Nuvio PS5 (Husam Osman): hardware decoder  GPL-3.0-or-later                ../LICENSE
 x264                                       GPL-2.0-or-later                GPL-2.0.txt
 FFmpeg                                     GPL-3.0-or-later (this build)   FFmpeg.txt, ../LICENSE
 LLVM libc++, libc++abi, libunwind          Apache-2.0 WITH LLVM-exception  LLVM.txt
@@ -32,6 +33,7 @@ bzip2                                      bzip2 License                   bzip2
 GNU libiconv                               LGPL-2.1-or-later               LGPL-2.1.txt
 dlmalloc (Doug Lea)                        MIT-0                           dlmalloc.txt
 nlohmann/json (Niels Lohmann)              MIT                             nlohmann-json.txt
+dht (Juliusz Chroboczek)                   MIT                             dht.txt
 stb_image (Sean Barrett)                   MIT / public domain             stb_image.txt
 Stremio icons, stremio-video               MIT                             Stremio-MIT.txt
 dashboard-icons (logo)                     Apache-2.0                      dashboard-icons.txt
