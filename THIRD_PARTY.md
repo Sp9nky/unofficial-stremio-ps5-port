@@ -48,6 +48,7 @@ license:
 | [xz / liblzma](https://tukaani.org/xz/) | 0BSD / public domain |
 | [bzip2](https://sourceware.org/bzip2/) | bzip2 license (BSD-style) |
 | [GNU libiconv](https://www.gnu.org/software/libiconv/) | LGPL-2.1-or-later |
+| [GNU FriBidi](https://github.com/fribidi/fribidi): right-to-left subtitles (Arabic, Hebrew) | LGPL-2.1-or-later |
 
 ## Build tools (downloaded at build time, not included here)
 
@@ -67,6 +68,7 @@ license:
 | UI icons (`app/assets/icons/`, made by `tools/make_icons.sh`) | [Stremio/stremio-icons](https://github.com/Stremio/stremio-icons) | MIT (as declared in its `package.json`) |
 | App and menu logo (`app/sce_sys/icon0.png`, `app/assets/icons/logo.png`) | [homarr-labs/dashboard-icons](https://github.com/homarr-labs/dashboard-icons) | Apache-2.0 (the logo itself is Stremio's trademark) |
 | Fonts (`app/fonts/`) | Noto Sans and Noto Emoji (Google) | SIL Open Font License 1.1 (`app/fonts/OFL.txt`) |
+| Arabic font (`app/fonts/NotoNaskhArabicUI-*`) | Noto Naskh Arabic UI (Google), as shipped by [Nuvio PS5](https://github.com/theghostonline/Nuvio-PS5) | SIL Open Font License 1.1 (`app/fonts/NotoNaskhArabicUI-NOTICE.txt`) |
 | `app/ca-bundle.crt` | Mozilla's CA certificate list, as distributed by curl | MPL-2.0 |
 | Home-screen backgrounds (`app/sce_sys/pic0*`, `pic1*`) | panels 3 (home screen) and 1 (loading screen) of `logo-presentation.png` from [Stremio/stremio-brand](https://github.com/Stremio/stremio-brand), Stremio's brand-materials repository | no license file; the repository offers its files for use. The Stremio name, logo and artwork are Stremio's |
 
