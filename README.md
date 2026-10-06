@@ -17,6 +17,11 @@ watch it, all with the DualSense.
 > Interactive Entertainment Inc. No Sony code, SDK, keys or firmware files
 > are included.
 
+## What's new in 0.3.1
+
+- **Arabic subtitles fixed**: they showed as white boxes; they now show in
+  an Arabic font, right to left, with joined letters.
+
 ## What's new in 0.3.0
 
 Fewer buffering stops:
