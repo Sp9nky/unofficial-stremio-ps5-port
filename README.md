@@ -1,5 +1,7 @@
 # Unofficial Stremio PS5 Port
 
+[![Support me on Ko-fi](https://img.shields.io/badge/Ko--fi-Support_this_project-FF5E5B?style=for-the-badge&logo=ko-fi&logoColor=white)](https://ko-fi.com/sp9nky)
+
 > [!IMPORTANT]
 > **Since version 0.2.0, no Stremio streaming server is needed.**
 > <ins>**The app streams movies and TV shows directly on the console**</ins>:
