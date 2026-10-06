@@ -8,6 +8,7 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <cstdio>
 #include <cstdint>
 #include <mutex>
 #include <string>
@@ -45,6 +46,9 @@ public:
 	int64_t seek(int64_t offset, int whence);
 
 	// An AVIOContext reading this stream; free with close_avio().
+	// Where big streams keep their read-ahead (the app's storage).
+	static void set_cache_dir(const std::string& dir);
+
 	static AVIOContext* open_avio(const std::string& url, const std::vector<std::string>& headers,
 	                              const std::atomic<bool>* abort, std::string* error, bool parallel = false);
 	static bool is_ours(AVIOContext* pb);
@@ -72,12 +76,20 @@ private:
 		int state = 0;       // 0 empty, 1 downloading, 2 ready
 		int attempts = 0;
 		double retry_at = 0;
-		std::vector<uint8_t> data;
+		int64_t len = 0;
+		std::vector<uint8_t> data;  // when the read-ahead is in memory
 	};
 	void start_parallel();
 	void worker();
 	int read_parallel(std::unique_lock<std::mutex>& lock, uint8_t* buf, int n);
+	void drop_disk_cache(const char* why);
+	void log_speed(int64_t bytes);
 	bool parallel_wanted_ = false, parallel_ = false;
+	int window_ = 32;           // chunks held ahead of the reader
+	FILE* cache_ = nullptr;     // the read-ahead on storage (slot i at i x 4 MB)
+	std::string cache_path_;
+	double speed_at_ = 0;
+	int64_t speed_bytes_ = 0;
 	std::string final_url_;  // after redirects, so each chunk goes straight there
 	void* cur_curl_ = nullptr;  // the single download's handle (for its final URL)
 	std::vector<Chunk> chunks_;

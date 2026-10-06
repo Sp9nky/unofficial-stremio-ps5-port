@@ -8,6 +8,7 @@ extern "C" {
 #include <curl/curl.h>
 
 #include <algorithm>
+#include <cerrno>
 #include <chrono>
 #include <cstring>
 #include <functional>
@@ -22,12 +23,21 @@ const int64_t kSkipWindow = 1 << 20;    // forward seeks shorter than this read 
 const int kRetries = 20;  // slow torrents: keep trying, as the PC app does (Circle stops)
 
 // Parallel mode (Nuvio PS5's numbers): files from 96 MB, 4 MB chunks, six
-// connections, up to 32 chunks (128 MB) held around the reader.
+// connections. The chunks ahead of the reader go to a file in the app's
+// storage, up to 6 GB (about half an hour of 4K at 25 Mbit/s), so a slow
+// patch in the download doesn't stop playback; in memory (128 MB) when the
+// file can't be used.
 const int64_t kParallelMin = 96ll << 20;
 const int64_t kChunk = 4ll << 20;
-const int kWindow = 32;
+const int kWindowRam = 32;
+const int kWindowDisk = 1536;
 const int kWorkers = 6;
-const int kChunkAttempts = 8;
+// A streaming server may still be fetching that part of the torrent: be patient.
+const int kChunkAttempts = 20;
+const double kSpeedLogEvery = 30;
+
+std::string g_cache_dir;
+std::atomic<int> g_cache_serial{0};
 
 int read_cb(void* opaque, uint8_t* buf, int n) { return static_cast<NetStream*>(opaque)->read(buf, n); }
 int64_t seek_cb(void* opaque, int64_t offset, int whence) {
@@ -73,6 +83,38 @@ NetStream::~NetStream() {
 	if (thread_.joinable()) thread_.join();
 	for (auto& w : workers_)
 		if (w.joinable()) w.join();
+	if (cache_) {
+		fclose(cache_);
+		remove(cache_path_.c_str());
+	}
+}
+
+void NetStream::set_cache_dir(const std::string& dir) {
+	g_cache_dir = dir;
+	for (int i = 0; i < 16; i++) remove((dir + "/stream-cache-" + std::to_string(i) + ".bin").c_str());  // left by a crash
+}
+
+// The download speed now and then, for the log (not shown in the app).
+void NetStream::log_speed(int64_t bytes) {  // m_ held
+	speed_bytes_ += bytes;
+	double now = now_seconds();
+	if (speed_at_ == 0) speed_at_ = now;
+	if (now - speed_at_ < kSpeedLogEvery) return;
+	double rate = speed_bytes_ / (now - speed_at_) / (1 << 20);
+	if (parallel_) {
+		int64_t idx = pos_ / kChunk, ahead = 0;  // ready chunks from the reader on
+		while (ahead < window_) {
+			const Chunk& s = chunks_[size_t((idx + ahead) % window_)];
+			if (s.index != idx + ahead || s.state != 2) break;
+			ahead++;
+		}
+		dlog("net: %.2f MB/s over %d connections, %lld MB downloaded ahead of the player%s", rate, kWorkers,
+		     (long long)(ahead * (kChunk >> 20)), cache_ ? "" : " (in memory)");
+	} else {
+		dlog("net: %.2f MB/s over one connection", rate);
+	}
+	speed_at_ = now;
+	speed_bytes_ = 0;
 }
 
 bool NetStream::stopped() const { return stop_ || (abort_ && abort_->load()); }
@@ -107,13 +149,32 @@ void NetStream::start_parallel() {  // m_ held
 	discard_ = 0;
 	eof_ = false;
 	parallel_ = true;
-	chunks_.assign(kWindow, Chunk());
+	window_ = kWindowRam;
+	if (!g_cache_dir.empty()) {
+		cache_path_ = g_cache_dir + "/stream-cache-" + std::to_string(g_cache_serial++ % 16) + ".bin";
+		cache_ = fopen(cache_path_.c_str(), "w+b");
+		if (cache_) window_ = kWindowDisk;
+		else dlog("net: can't create %s (errno %d); read-ahead in memory", cache_path_.c_str(), errno);
+	}
+	chunks_.assign(size_t(window_), Chunk());
 	window_base_ = pos_ / kChunk;
 	par_started_ = now_seconds();
 	par_bytes_ = 0;
 	if (final_url_.empty()) final_url_ = url_;
 	for (int i = 0; i < kWorkers; i++) workers_.emplace_back([this] { worker(); });
-	dlog("net: %lld MB file, downloading with %d connections", (long long)(size_ >> 20), kWorkers);
+	dlog("net: %lld MB file, downloading with %d connections, up to %d MB ahead %s", (long long)(size_ >> 20),
+	     kWorkers, int(window_ * (kChunk >> 20)), cache_ ? "on storage" : "in memory");
+}
+
+// Storage failed (full, or refused): carry on with the read-ahead in memory.
+void NetStream::drop_disk_cache(const char* why) {  // m_ held
+	dlog("net: stream cache %s (errno %d); read-ahead in memory from now on", why, errno);
+	fclose(cache_);
+	remove(cache_path_.c_str());
+	cache_ = nullptr;
+	window_ = kWindowRam;
+	chunks_.assign(size_t(window_), Chunk());
+	cv_.notify_all();
 }
 
 namespace {
@@ -142,8 +203,8 @@ void NetStream::worker() {
 		double now = now_seconds();
 		int64_t last = (size_ - 1) / kChunk;
 		int64_t pick = -1;
-		for (int64_t i = window_base_; i < window_base_ + kWindow && i <= last; i++) {
-			Chunk& s = chunks_[size_t(i % kWindow)];
+		for (int64_t i = window_base_; i < window_base_ + window_ && i <= last; i++) {
+			Chunk& s = chunks_[size_t(i % window_)];
 			if (s.state == 1) continue;  // busy (this chunk, or an old one still finishing)
 			if (s.index == i && s.state == 2) continue;
 			if (s.index == i && now < s.retry_at) continue;
@@ -154,21 +215,26 @@ void NetStream::worker() {
 			cv_.wait_for(lock, std::chrono::milliseconds(100));
 			continue;
 		}
-		Chunk& slot = chunks_[size_t(pick % kWindow)];
-		if (slot.index != pick) slot.attempts = 0;
-		slot.index = pick;
-		slot.state = 1;
-		slot.data.clear();
+		const int my_window = window_;
+		const size_t si = size_t(pick % window_);
+		{
+			Chunk& slot = chunks_[si];
+			if (slot.index != pick) slot.attempts = 0;
+			slot.index = pick;
+			slot.state = 1;
+			slot.data.clear();
+		}
 		int64_t from = pick * kChunk, to = std::min(size_, from + kChunk) - 1;
 		std::string url = final_url_;
 		lock.unlock();
 
 		std::vector<uint8_t> data;
 		data.reserve(size_t(to - from + 1));
-		ChunkFetch f{&data, size_t(to - from + 1), [this, pick] {
+		ChunkFetch f{&data, size_t(to - from + 1), [this, pick, my_window] {
 			            std::lock_guard<std::mutex> l(m_);
 			            // Give up when closed, or when a seek left this chunk behind.
-			            return !stopped() && pick >= window_base_ && pick < window_base_ + kWindow;
+			            return !stopped() && window_ == my_window && pick >= window_base_ &&
+			                   pick < window_base_ + window_;
 		            }};
 		char errbuf[CURL_ERROR_SIZE] = {0};
 		struct curl_slist* hdrs = nullptr;
@@ -184,7 +250,7 @@ void NetStream::worker() {
 		curl_easy_setopt(c, CURLOPT_IPRESOLVE, CURL_IPRESOLVE_V4);
 		curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 15L);
 		curl_easy_setopt(c, CURLOPT_LOW_SPEED_LIMIT, 1L);
-		curl_easy_setopt(c, CURLOPT_LOW_SPEED_TIME, 30L);
+		curl_easy_setopt(c, CURLOPT_LOW_SPEED_TIME, 120L);
 		curl_easy_setopt(c, CURLOPT_ERRORBUFFER, errbuf);
 		curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, chunk_data);
 		curl_easy_setopt(c, CURLOPT_WRITEDATA, &f);
@@ -201,19 +267,26 @@ void NetStream::worker() {
 		if (hdrs) curl_slist_free_all(hdrs);
 
 		lock.lock();
-		if (slot.index != pick) continue;  // not ours any more
+		if (window_ != my_window || chunks_[si].index != pick) continue;  // not ours any more
+		Chunk& slot = chunks_[si];
 		if (rc == CURLE_OK && status == 206 && data.size() == size_t(to - from + 1)) {
-			slot.data = std::move(data);
+			if (cache_) {  // to storage, in this slot's place in the file
+				if (fseeko(cache_, off_t(si) * kChunk, SEEK_SET) != 0 ||
+				    fwrite(data.data(), 1, data.size(), cache_) != data.size() || fflush(cache_) != 0) {
+					drop_disk_cache("write failed");
+					continue;
+				}
+				slot.len = int64_t(data.size());
+			} else {
+				slot.data = std::move(data);
+				slot.len = int64_t(slot.data.size());
+			}
 			slot.state = 2;
 			par_bytes_ += to - from + 1;
-			if (par_bytes_ >> 26 != (par_bytes_ - (to - from + 1)) >> 26) {  // every 64 MB
-				double secs = std::max(0.1, now_seconds() - par_started_);
-				dlog("net: %lld MB in %.0f s with %d connections (%.1f MB/s)", (long long)(par_bytes_ >> 20), secs,
-				     kWorkers, par_bytes_ / secs / (1 << 20));
-			}
+			log_speed(to - from + 1);
 		} else {
 			slot.state = 0;
-			if (!stopped() && pick >= window_base_ && pick < window_base_ + kWindow) {
+			if (!stopped() && pick >= window_base_ && pick < window_base_ + window_) {
 				slot.attempts++;
 				slot.retry_at = now_seconds() + std::min(8, slot.attempts);
 				std::string why = status >= 400 ? "HTTP " + std::to_string(status)
@@ -236,16 +309,24 @@ int NetStream::read_parallel(std::unique_lock<std::mutex>& lock, uint8_t* buf, i
 		int64_t idx = pos_ / kChunk;
 		// The window follows the reader, one chunk kept behind it for short
 		// steps back; a jump outside it starts a new one there.
-		int64_t base = idx < window_base_ || idx >= window_base_ + kWindow ? idx : std::max(window_base_, idx - 1);
+		int64_t base = idx < window_base_ || idx >= window_base_ + window_ ? idx : std::max(window_base_, idx - 1);
 		if (base != window_base_) {
 			window_base_ = base;
 			cv_.notify_all();
 		}
-		Chunk& s = chunks_[size_t(idx % kWindow)];
+		size_t si = size_t(idx % window_);
+		Chunk& s = chunks_[si];
 		if (s.index == idx && s.state == 2) {
 			size_t off = size_t(pos_ - idx * kChunk);
-			size_t k = std::min(size_t(n), s.data.size() - off);
-			memcpy(buf, s.data.data() + off, k);
+			size_t k = std::min(size_t(n), size_t(s.len) - off);
+			if (cache_) {
+				if (fseeko(cache_, off_t(si) * kChunk + off_t(off), SEEK_SET) != 0 || fread(buf, 1, k, cache_) != k) {
+					drop_disk_cache("read failed");
+					continue;  // fetched again, into memory
+				}
+			} else {
+				memcpy(buf, s.data.data() + off, k);
+			}
 			pos_ += int64_t(k);
 			return int(k);
 		}
@@ -420,6 +501,7 @@ size_t NetStream::on_data(char* data, size_t size, size_t n, void* self) {
 		s->head_ = 0;
 	}
 	s->buf_.insert(s->buf_.end(), data, data + len);
+	s->log_speed(int64_t(len));
 	s->cv_.notify_all();
 	return size * n;
 }

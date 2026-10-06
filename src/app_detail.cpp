@@ -678,6 +678,11 @@ void App::play_stream(const Stream& st, bool transcode) {
 		    if (builtin) t_stats_url_ = r.url;
 		    else if (r.file_idx >= 0)
 			    t_stats_url_ = srv + "/" + s.info_hash + "/" + std::to_string(r.file_idx) + "/stats.json";
-		    watch_start(r.url, r.headers, start, title, subtitle, !s.url.empty() && r.url == s.url);
+		    // Several connections and the long read-ahead for big files: direct
+		    // links and the streaming server's torrent streams (a single
+		    // connection from the server gave 3-6 MB/s, six 8 MB/s; PS5
+		    // 2026-10-06). Not for transcoding, which is a playlist of pieces.
+		    bool par = r.url.find("/hlsv2/") == std::string::npos;
+		    watch_start(r.url, r.headers, start, title, subtitle, par);
 	    });
 }

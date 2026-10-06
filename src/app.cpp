@@ -49,9 +49,11 @@ bool App::init(Rml::Context* ctx, SDL_Renderer* renderer, const std::string& bas
 	renderer_ = renderer;
 	base_dir_ = base_dir;
 	data_dir_ = data_dir;
-	// The built-in torrent engine keeps a 1 GB rolling cache in the app's
-	// storage (2 GB in param.json, shared with the artwork cache).
-	bt::Engine::get().configure(data_dir_, 1ll << 30);
+	// The app's storage (16 GB, param.json) holds the read-ahead: the
+	// built-in torrent engine's 6 GB rolling cache, and up to 6 GB for a
+	// stream from a server or a direct link; the rest is the artwork cache.
+	bt::Engine::get().configure(data_dir_, 6ll << 30);
+	NetStream::set_cache_dir(data_dir_);
 
 	load_settings();
 	load_progress();
