@@ -6,6 +6,7 @@
 
 enum SettingRow {
 	kAccount,
+	kTorrents,
 	kServer,
 	kSubLangs,
 	kAutoSubs,
@@ -37,7 +38,15 @@ void App::settings_refresh() {
 	                    signed_in() ? (g_confirm_sign_out ? "Press Cross again to sign out." : "Press Cross to sign out.")
 	                                : "Sign in to sync your addons, library and Continue Watching. Press Cross.",
 	                    signed_in() ? settings_.user_email : "Not signed in"};
-	s_rows[kServer] = {"Streaming server", "Your Stremio server, e.g. http://192.168.1.20:11470. Press Cross to change.",
+	s_rows[kTorrents] = {"Play torrents with",
+	                     settings_.builtin_torrents
+	                         ? "The app downloads torrents itself; no server needed. Press Cross to use your server."
+	                         : "Your Stremio streaming server downloads torrents. Press Cross to use the app's own.",
+	                     settings_.builtin_torrents ? "This app" : "Streaming server"};
+	s_rows[kServer] = {"Streaming server",
+	                   settings_.builtin_torrents
+	                       ? "Optional: for server transcoding. Your Stremio server, e.g. http://192.168.1.20:11470."
+	                       : "Your Stremio server, e.g. http://192.168.1.20:11470. Press Cross to change.",
 	                   settings_.server_url.empty() ? "Not set" : settings_.server_url};
 	s_rows[kSubLangs] = {"Subtitle languages", "Preferred order, e.g. \"gre, eng\". Press Cross to change.",
 	                     settings_.subtitle_langs.empty() ? "None" : settings_.subtitle_langs};
@@ -83,6 +92,12 @@ void App::settings_button(Btn b) {
 				g_confirm_sign_out = false;
 				sign_out();
 			}
+			break;
+		case kTorrents:
+			settings_.builtin_torrents = !settings_.builtin_torrents;
+			save_settings();
+			on_addons_loaded();  // the banner depends on it
+			settings_refresh();
 			break;
 		case kServer:
 			open_input("Streaming server address", settings_.server_url.empty() ? "http://" : settings_.server_url,

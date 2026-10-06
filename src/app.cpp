@@ -7,6 +7,7 @@
 #include "artcache.h"
 #include "http.h"
 #include "tasks.h"
+#include "torrent/engine.h"
 
 // Pitches mirrored from the stylesheets (see the comments there), in dp,
 // so times kUiScale in pixels.
@@ -48,6 +49,9 @@ bool App::init(Rml::Context* ctx, SDL_Renderer* renderer, const std::string& bas
 	renderer_ = renderer;
 	base_dir_ = base_dir;
 	data_dir_ = data_dir;
+	// The built-in torrent engine keeps a 1 GB rolling cache in the app's
+	// storage (2 GB in param.json, shared with the artwork cache).
+	bt::Engine::get().configure(data_dir_, 1ll << 30);
 
 	load_settings();
 	load_progress();
@@ -75,6 +79,7 @@ bool App::init(Rml::Context* ctx, SDL_Renderer* renderer, const std::string& bas
 void App::shutdown() {
 	if (watching_) watch_stop(false);
 	player_.close();
+	bt::Engine::get().shutdown();
 	save_progress();
 }
 
@@ -266,6 +271,7 @@ void App::load_settings() {
 	json j;
 	if (load_json(data_dir_ + "/settings.json", j)) {
 		settings_.server_url = jstr(j, "server_url");
+		settings_.builtin_torrents = jbool(j, "builtin_torrents", settings_.builtin_torrents);
 		settings_.subtitle_langs = jstr(j, "subtitle_languages", settings_.subtitle_langs);
 		settings_.auto_subtitles = jbool(j, "auto_subtitles", settings_.auto_subtitles);
 		settings_.sub_size = jstr(j, "subtitle_size", settings_.sub_size);
@@ -320,6 +326,7 @@ void App::load_settings() {
 void App::save_settings() {
 	json j;
 	j["server_url"] = settings_.server_url;
+	j["builtin_torrents"] = settings_.builtin_torrents;
 	j["subtitle_languages"] = settings_.subtitle_langs;
 	j["auto_subtitles"] = settings_.auto_subtitles;
 	j["subtitle_size"] = settings_.sub_size;
@@ -463,8 +470,9 @@ void App::load_addons() {
 }
 
 void App::on_addons_loaded() {
-	// No banner asking to sign in; sign-in is in Settings.
-	if (signed_in() && server().empty())
+	// No banner asking to sign in; sign-in is in Settings. Torrents need a
+	// server only when the built-in engine is off.
+	if (signed_in() && !settings_.builtin_torrents && server().empty())
 		banner = "Welcome! Open Settings in the menu on the left and enter your Stremio streaming server, e.g. "
 		         "http://192.168.1.20:11470";
 	else banner = "";

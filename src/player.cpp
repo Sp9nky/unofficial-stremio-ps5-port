@@ -17,13 +17,19 @@ extern "C" {
 #include "http.h"
 #include "netstream.h"
 #include "stremio.h"
+#include "torrent/torrent_stream.h"
 #include "util.h"
 
 static const int kOutRate = 48000;
 static const int kOutBytesPerSec = kOutRate * 2 * 2;  // s16 stereo
 static const double kMaxQueuedAudio = 0.35;            // seconds kept in SDL's queue
-static const double kBufferTarget = 2.0;               // seconds buffered before (re)starting
-static const size_t kMaxQueueBytes = 96u << 20;
+// Seconds buffered before playback starts. Each time the download falls
+// behind and playback has to stop, the next wait is longer (up to 30 s), so a
+// stream that's barely fast enough stops a few times for longer instead of
+// every few seconds (4K over a torrent, PS5 2026-10-06).
+static const double kBufferTargets[] = {2, 5, 10, 20, 30};
+// Packets held in memory: 30 s of a 4K remux at ~60 Mbit/s.
+static const size_t kMaxQueueBytes = 256u << 20;
 static const int kMaxFrames = 4;
 static const int kScreenW = 1920, kScreenH = 1080;
 
@@ -137,7 +143,11 @@ void Player::open(const Options& opts) {
 	paused_ = false;
 	buffering_ = true;
 	buffer_percent_ = 0;
-	dropped_ = decoded_ = 0;
+	dropped_ = decoded_ = shown_ = 0;
+	log_at_ = 0;
+	stalls_ = 0;
+	stall_count_ = 0;
+	start_target_ = 0;
 	too_heavy_ = false;
 	heavy_window_start_ = now_seconds();
 	heavy_window_dropped_ = heavy_window_decoded_ = 0;
@@ -251,7 +261,8 @@ static bool is_text_subtitle(const AVCodecParameters* par) {
 void Player::demux_thread() {
 	demux_run();
 	// The input is closed by now; the network stream behind it goes last.
-	if (main_pb_) NetStream::close_avio(&main_pb_);
+	if (TorrentStream::is_ours(main_pb_)) TorrentStream::close_avio(&main_pb_);
+	else if (main_pb_) NetStream::close_avio(&main_pb_);
 }
 
 void Player::demux_run() {
@@ -281,9 +292,12 @@ void Player::demux_run() {
 	io_hooks_.abort = &abort_;
 	NetStream::install(fmt_, &io_hooks_);
 	dlog("player: opening %s", opts_.url.c_str());
-	if (starts_with(opts_.url, "http://") || starts_with(opts_.url, "https://")) {
+	bool torrent = TorrentStream::is_url(opts_.url);
+	if (torrent || starts_with(opts_.url, "http://") || starts_with(opts_.url, "https://")) {
 		std::string err;
-		main_pb_ = NetStream::open_avio(opts_.url, opts_.headers, &abort_, &err);
+		// A torrent from the built-in engine, or HTTP(S) through libcurl.
+		main_pb_ = torrent ? TorrentStream::open_avio(opts_.url, &abort_, &err)
+		                   : NetStream::open_avio(opts_.url, opts_.headers, &abort_, &err, opts_.parallel);
 		if (!main_pb_) {
 			avformat_free_context(fmt_);
 			fmt_ = nullptr;
@@ -298,7 +312,8 @@ void Player::demux_run() {
 		// the part the server has least of, so it could take minutes before
 		// the first frame. Start from the beginning instead, without them;
 		// the first seek opens the file again with the index (see seek()).
-		if (opts_.start <= 0 && NetStream::of(main_pb_)->peek(4) == "\x1A\x45\xDF\xA3") {
+		std::string magic = torrent ? TorrentStream::of(main_pb_)->peek(4) : NetStream::of(main_pb_)->peek(4);
+		if (opts_.start <= 0 && magic == "\x1A\x45\xDF\xA3") {
 			main_pb_->seekable = 0;
 			quick_ = true;
 			// Matroska describes its tracks in the header, so a short look
@@ -343,7 +358,28 @@ void Player::demux_run() {
 		return;
 	}
 
-	if (vs >= 0 && !open_stream_codec(vs, &vctx_)) {
+	// Colours, from the stream's tags: HDR10 (PQ) gets tone mapped; SD
+	// pictures use BT.601, everything else BT.709.
+	if (vs >= 0) {
+		const AVCodecParameters* p = fmt_->streams[vs]->codecpar;
+		bool sd_space = p->color_space == AVCOL_SPC_BT470BG || p->color_space == AVCOL_SPC_SMPTE170M;
+		colors_ = p->color_trc == AVCOL_TRC_SMPTE2084 ? YuvColors::Hdr10
+		          : (sd_space || (p->color_space == AVCOL_SPC_UNSPECIFIED && p->height < 720)) ? YuvColors::Bt601
+		                                                                                       : YuvColors::Bt709;
+		dlog("player: colours %s (transfer %d, matrix %d, primaries %d)",
+		     colors_ == YuvColors::Hdr10 ? "HDR10, tone mapped" : colors_ == YuvColors::Bt601 ? "BT.601" : "BT.709",
+		     int(p->color_trc), int(p->color_space), int(p->color_primaries));
+	}
+	// Video: the hardware decoder when it takes the stream; FFmpeg's software
+	// decoder otherwise (and if the hardware one fails later).
+	if (vs >= 0) {
+		std::string why;
+		hw_.reset(HwDecoder::open(fmt_->streams[vs]->codecpar, &why));
+		hw_active_ = hw_ != nullptr;
+		hw_shift_ = -1;
+		if (!hw_) dlog("player: software video decoding (%s)", why.c_str());
+	}
+	if (vs >= 0 && !hw_ && !open_stream_codec(vs, &vctx_)) {
 		AVStream* st = fmt_->streams[vs];
 		std::string name = avcodec_get_name(st->codecpar->codec_id);
 		avformat_close_input(&fmt_);
@@ -388,6 +424,18 @@ void Player::demux_run() {
 	     vs >= 0 ? avcodec_get_name(fmt_->streams[vs]->codecpar->codec_id) : "-", as,
 	     as >= 0 ? avcodec_get_name(fmt_->streams[as]->codecpar->codec_id) : "-");
 
+	// How much to buffer before playing (and after a seek): a high-bitrate
+	// file (a 4K remux) needs more, or playback starts before the download
+	// is up to speed and runs dry within the first minute (PS5 2026-10-06:
+	// Avengers: Endgame 4K, ~25 Mbit/s, stopped once at 45 s with 2 s buffered).
+	{
+		int64_t size = fmt_->pb ? avio_size(fmt_->pb) : -1;
+		double mbps = fmt_->bit_rate > 0 ? fmt_->bit_rate / 1e6
+		              : (size > 0 && duration_ > 0) ? size * 8.0 / duration_ / 1e6
+		                                            : 0;
+		start_target_ = mbps >= 40 ? 15 : mbps >= 20 ? 10 : mbps >= 10 ? 5 : 2;
+		dlog("player: about %.0f Mbit/s, buffering %.0f s before playing", mbps, start_target_);
+	}
 	if (opts_.start > 0) do_seek(opts_.start);
 	state_ = State::Playing;
 	apply_run_state();
@@ -434,12 +482,12 @@ void Player::demux_run() {
 			if (abort_) break;
 			// The download gave up (not the end of the video): say so,
 			// rather than ending playback as if the video were over.
-			if (NetStream* ns = main_pb_ ? NetStream::of(main_pb_) : nullptr) {
-				std::string why = ns->failure();
-				if (!why.empty()) {
-					fail("The stream stopped (" + why + ")");
-					break;
-				}
+			std::string why;
+			if (NetStream* ns = main_pb_ ? NetStream::of(main_pb_) : nullptr) why = ns->failure();
+			if (TorrentStream* ts = main_pb_ ? TorrentStream::of(main_pb_) : nullptr) why = ts->failure();
+			if (!why.empty()) {
+				fail("The stream stopped (" + why + ")");
+				break;
 			}
 			bool at_end = r == AVERROR_EOF || (fmt_->pb && avio_feof(fmt_->pb));
 			if (!at_end && ++errors < 60) {
@@ -479,6 +527,12 @@ void Player::demux_run() {
 	if (audio_.joinable()) audio_.join();
 
 	avcodec_free_context(&vctx_);
+	hw_.reset();
+	hw_active_ = false;
+	if (hw_sws_) {
+		sws_freeContext(hw_sws_);
+		hw_sws_ = nullptr;
+	}
 	{
 		std::lock_guard<std::mutex> lock(actx_m_);
 		avcodec_free_context(&actx_);
@@ -567,6 +621,7 @@ void Player::handle_subtitle_packet(AVPacket* pkt) {
 // Video
 
 void Player::video_thread() {
+	if (hw_ && video_thread_hw()) return;
 	AVPacket* pkt = nullptr;
 	AVFrame* frame = av_frame_alloc();
 	int serial = vq_.serial();
@@ -612,81 +667,289 @@ void Player::video_thread() {
 			if (rr < 0) break;
 			decoded_++;
 			double pts = to_sec(frame->best_effort_timestamp, tb);
-			double drop = vdrop_;
-			if (drop >= 0) {
-				if (pts >= 0 && pts < drop - 0.02) {
-					av_frame_unref(frame);
-					continue;
-				}
-				vdrop_ = -1;
-			}
-			// Hopelessly late and something else is ready: skip the conversion.
-			// (Never hold clock_m_ while taking fq_m_: present() nests them the other way.)
-			{
-				double clk;
-				{
-					std::lock_guard<std::mutex> cl(clock_m_);
-					clk = clock_locked();
-				}
-				std::lock_guard<std::mutex> fl(fq_m_);
-				if (!buffering_ && !frames_.empty() && pts >= 0 && pts < clk - 0.2) {
-					dropped_++;
-					av_frame_unref(frame);
-					continue;
-				}
-			}
-
-			// Wait for room in the frame queue.
-			std::unique_lock<std::mutex> lock(fq_m_);
-			fq_cv_.wait_for(lock, std::chrono::milliseconds(500), [&] {
-				return abort_ || int(frames_.size()) < kMaxFrames || vq_.serial() != serial;
-			});
-			while (!abort_ && int(frames_.size()) >= kMaxFrames && vq_.serial() == serial)
-				fq_cv_.wait_for(lock, std::chrono::milliseconds(50));
-			if (abort_ || vq_.serial() != serial) {
-				av_frame_unref(frame);
-				break;
-			}
-			Frame f;
-			if (!pool_.empty()) {
-				f = std::move(pool_.back());
-				pool_.pop_back();
-			}
-			lock.unlock();
-
-			// Scale to fit the screen, keeping the display aspect ratio.
-			int sw = frame->width, sh = frame->height;
 			double sar = frame->sample_aspect_ratio.num > 0 ? av_q2d(frame->sample_aspect_ratio) : 1.0;
-			double dar = sw * sar / sh;
-			int dw = kScreenW, dh = int(kScreenW / dar);
-			if (dh > kScreenH) {
-				dh = kScreenH;
-				dw = int(kScreenH * dar);
-			}
-			dw &= ~1;
-			dh &= ~1;
-			sws_ = sws_getCachedContext(sws_, sw, sh, AVPixelFormat(frame->format), dw, dh, AV_PIX_FMT_BGRA,
-			                            (dw == sw && dh == sh) ? SWS_POINT : SWS_BILINEAR, nullptr, nullptr, nullptr);
-			if (!sws_) {
-				av_frame_unref(frame);
-				continue;
-			}
-			f.w = dw;
-			f.h = dh;
-			f.pixels.resize(size_t(dw) * dh * 4);
-			uint8_t* dst[4] = {f.pixels.data(), nullptr, nullptr, nullptr};
-			int dst_stride[4] = {dw * 4, 0, 0, 0};
-			sws_scale(sws_, frame->data, frame->linesize, 0, sh, dst, dst_stride);
-			f.pts = pts;
-			f.serial = serial;
+			bool ok = emit_frame(pts, serial, [&](Frame& f) {
+				// 4:2:0 HDR (and plain 4:2:0) through the same conversion as
+				// hardware pictures; anything else through swscale.
+				if (frame->format == AV_PIX_FMT_YUV420P10LE || frame->format == AV_PIX_FMT_YUV420P) {
+					YuvPicture yp;
+					yp.y = frame->data[0];
+					yp.u = frame->data[1];
+					yp.v = frame->data[2];
+					yp.y_stride = frame->linesize[0];
+					yp.c_stride = frame->linesize[1];
+					yp.wide = frame->format == AV_PIX_FMT_YUV420P10LE;
+					yp.width = frame->width;
+					yp.height = frame->height;
+					if (frame->linesize[1] == frame->linesize[2] && fast_convert(yp, f)) return;
+				}
+				sws_ = sws_getCachedContext(sws_, frame->width, frame->height, AVPixelFormat(frame->format), f.w, f.h,
+				                            AV_PIX_FMT_BGRA,
+				                            (f.w == frame->width && f.h == frame->height) ? SWS_POINT : SWS_BILINEAR,
+				                            nullptr, nullptr, nullptr);
+				if (!sws_) return;
+				uint8_t* dst[4] = {f.pixels.data(), nullptr, nullptr, nullptr};
+				int dst_stride[4] = {f.w * 4, 0, 0, 0};
+				sws_scale(sws_, frame->data, frame->linesize, 0, frame->height, dst, dst_stride);
+			}, frame->width, frame->height, sar);
 			av_frame_unref(frame);
-
-			lock.lock();
-			frames_.push_back(std::move(f));
+			if (!ok) break;
 		}
 	}
 	if (pkt) av_packet_free(&pkt);
 	av_frame_free(&frame);
+}
+
+// A decoded picture into the frame queue, scaled to the screen by `fill`.
+// Skips pictures before a seek target or hopelessly late ones. False when
+// playback was closed or seeked meanwhile.
+bool Player::emit_frame(double pts, int serial, const std::function<void(Frame&)>& fill, int src_w, int src_h,
+                        double sar) {
+	double drop = vdrop_;
+	if (drop >= 0) {
+		if (pts >= 0 && pts < drop - 0.02) return true;
+		vdrop_ = -1;
+	}
+	// Hopelessly late and something else is ready: skip the conversion.
+	// (Never hold clock_m_ while taking fq_m_: present() nests them the other way.)
+	{
+		double clk;
+		{
+			std::lock_guard<std::mutex> cl(clock_m_);
+			clk = clock_locked();
+		}
+		std::lock_guard<std::mutex> fl(fq_m_);
+		if (!buffering_ && !frames_.empty() && pts >= 0 && pts < clk - 0.2) {
+			dropped_++;
+			return true;
+		}
+	}
+
+	// Wait for room in the frame queue.
+	std::unique_lock<std::mutex> lock(fq_m_);
+	fq_cv_.wait_for(lock, std::chrono::milliseconds(500), [&] {
+		return abort_ || int(frames_.size()) < kMaxFrames || vq_.serial() != serial;
+	});
+	while (!abort_ && int(frames_.size()) >= kMaxFrames && vq_.serial() == serial)
+		fq_cv_.wait_for(lock, std::chrono::milliseconds(50));
+	if (abort_ || vq_.serial() != serial) return false;
+	Frame f;
+	if (!pool_.empty()) {
+		f = std::move(pool_.back());
+		pool_.pop_back();
+	}
+	lock.unlock();
+
+	// Scale to fit the screen, keeping the display aspect ratio.
+	double dar = src_w * sar / src_h;
+	int dw = kScreenW, dh = int(kScreenW / dar);
+	if (dh > kScreenH) {
+		dh = kScreenH;
+		dw = int(kScreenH * dar);
+	}
+	f.w = dw & ~1;
+	f.h = dh & ~1;
+	f.pixels.resize(size_t(f.w) * f.h * 4);
+	fill(f);
+	f.pts = pts;
+	f.serial = serial;
+
+	lock.lock();
+	frames_.push_back(std::move(f));
+	return true;
+}
+
+// ---------------------------------------------------------------------------
+// Hardware decoding
+
+namespace {
+
+// A few threads that convert one picture together: the conversion of a 4K
+// picture is too much for one core at 60 frames a second.
+class RowPool {
+public:
+	static RowPool& get() {
+		static RowPool* p = new RowPool();  // never destroyed: threads outlive statics at exit
+		return *p;
+	}
+	// fn(first_row, end_row) over [0, rows), split between the threads.
+	void run(int rows, const std::function<void(int, int)>& fn) {
+		const int parts = kThreads + 1;
+		std::unique_lock<std::mutex> lock(m_);
+		fn_ = &fn;
+		rows_ = rows;
+		parts_ = parts;
+		pending_ = kThreads;
+		gen_++;
+		cv_.notify_all();
+		lock.unlock();
+		fn(0, rows / parts);  // this thread does the first part
+		lock.lock();
+		done_cv_.wait(lock, [&] { return pending_ == 0; });
+		fn_ = nullptr;
+	}
+
+private:
+	static const int kThreads = 3;
+	RowPool() {
+		for (int i = 0; i < kThreads; i++) std::thread([this, i] { loop(i + 1); }).detach();
+	}
+	void loop(int part) {
+		int seen = 0;
+		for (;;) {
+			std::unique_lock<std::mutex> lock(m_);
+			cv_.wait(lock, [&] { return gen_ != seen; });
+			seen = gen_;
+			const std::function<void(int, int)>* fn = fn_;
+			int rows = rows_, parts = parts_;
+			lock.unlock();
+			int a = rows * part / parts, b = rows * (part + 1) / parts;
+			if (fn && a < b) (*fn)(a, b);
+			lock.lock();
+			if (--pending_ == 0) done_cv_.notify_all();
+		}
+	}
+	std::mutex m_;
+	std::condition_variable cv_, done_cv_;
+	const std::function<void(int, int)>* fn_ = nullptr;
+	int rows_ = 0, parts_ = 1, pending_ = 0, gen_ = 0;
+};
+
+}  // namespace
+
+// A picture to the BGRA frame with the right colours (yuv_convert.h), at the
+// same size or exactly half (4K to the 1080p screen), on four threads.
+// False for other sizes (the caller uses swscale).
+bool Player::fast_convert(const YuvPicture& pic, Frame& f) {
+	auto near = [](int a, int b) { return a >= b - 1 && a <= b + 1; };
+	int scale = (f.w == pic.width && f.h == pic.height) ? 1
+	            : (near(f.w * 2, pic.width) && near(f.h * 2, pic.height)) ? 2
+	                                                                      : 0;
+	if (!scale) return false;
+	YuvColors colors = colors_;
+	RowPool::get().run(
+	    f.h, [&](int a, int b) { yuv_to_bgra(pic, colors, scale, f.pixels.data(), f.w, a, b); });
+	return true;
+}
+
+// A hardware picture: two planes (Y, then interleaved UV), 8 or 16-bit samples.
+void Player::hw_to_bgra(const HwDecoder::Picture& pic, Frame& f) {
+	if (pic.ten_bit && hw_shift_ < 0) {
+		// 10-bit samples sit either in the low or the high bits of each
+		// 16-bit word; look at a few to tell.
+		int max = 0;
+		for (int y = 0; y < pic.height; y += 97) {
+			auto* row = reinterpret_cast<const uint16_t*>(pic.y + size_t(y) * pic.pitch);
+			for (int x = 0; x < pic.width; x += 31) max = std::max<int>(max, row[x]);
+		}
+		hw_shift_ = max > 1023 ? 6 : 0;
+		dlog("player: 10-bit pictures, samples in the %s bits", hw_shift_ ? "high" : "low");
+	}
+	YuvPicture yp;
+	yp.y = pic.y;
+	yp.u = pic.uv;
+	yp.y_stride = yp.c_stride = pic.pitch;
+	yp.interleaved = true;
+	yp.wide = pic.ten_bit;
+	yp.shift = pic.ten_bit ? hw_shift_ : 0;
+	yp.width = pic.width;
+	yp.height = pic.height;
+	if (fast_convert(yp, f)) return;
+	// Other sizes: swscale from NV12 / P010.
+	AVPixelFormat fmt = pic.ten_bit ? AV_PIX_FMT_P010LE : AV_PIX_FMT_NV12;
+	hw_sws_ = sws_getCachedContext(hw_sws_, pic.width, pic.height, fmt, f.w, f.h, AV_PIX_FMT_BGRA, SWS_BILINEAR,
+	                               nullptr, nullptr, nullptr);
+	if (!hw_sws_) return;
+	const uint8_t* src[4] = {pic.y, pic.uv, nullptr, nullptr};
+	int src_stride[4] = {pic.pitch, pic.pitch, 0, 0};
+	uint8_t* dst[4] = {f.pixels.data(), nullptr, nullptr, nullptr};
+	int dst_stride[4] = {f.w * 4, 0, 0, 0};
+	sws_scale(hw_sws_, src, src_stride, 0, pic.height, dst, dst_stride);
+}
+
+// The video thread while the hardware decoder plays. Returns true when
+// playback ended or closed; false when the decoder failed and the software
+// decoder should take over from here.
+bool Player::video_thread_hw() {
+	AVPacket* pkt = nullptr;
+	int serial = vq_.serial();
+	bool sent_eof = false;
+	AVStream* st = fmt_->streams[video_stream_];
+	double tb = av_q2d(st->time_base);
+	double sar = st->codecpar->sample_aspect_ratio.num > 0 ? av_q2d(st->codecpar->sample_aspect_ratio) : 1.0;
+	bool failed = false;
+
+	auto drain = [&]() -> bool {  // decoded pictures out; false if playback moved on
+		HwDecoder::Picture pic;
+		for (;;) {
+			int rr = hw_->receive(&pic);
+			if (rr < 0) {
+				failed = true;
+				return true;
+			}
+			if (rr == 0) return true;
+			decoded_++;
+			double pts = pic.pts_us == INT64_MIN ? -1 : double(pic.pts_us) / 1e6;
+			if (!emit_frame(pts, serial, [&](Frame& f) { hw_to_bgra(pic, f); }, pic.width, pic.height, sar))
+				return false;
+		}
+	};
+
+	while (!abort_ && !failed) {
+		int s = 0;
+		int r = vq_.get(&pkt, &s, 50);
+		if (abort_) break;
+		if (r == 0) continue;
+		if (r == 1 && s != serial) {
+			hw_->flush();
+			serial = s;
+			sent_eof = false;
+			video_drained_ = false;
+		}
+		if (r == -1) {
+			if (sent_eof) {
+				SDL_Delay(10);
+				if (vq_.serial() != serial) {
+					hw_->flush();
+					serial = vq_.serial();
+					sent_eof = false;
+					video_drained_ = false;
+				}
+				continue;
+			}
+			hw_->send(nullptr, 0, 0);
+			sent_eof = true;
+			drain();
+			video_drained_ = true;
+			continue;
+		}
+		double ps = pkt->pts != AV_NOPTS_VALUE ? to_sec(pkt->pts, tb) : -1;
+		int64_t pts_us = pkt->pts != AV_NOPTS_VALUE ? int64_t(ps * 1e6) : INT64_MIN;
+		for (;;) {
+			int sr = hw_->send(pkt->data, pkt->size, pts_us);
+			if (sr == 1) {  // pictures waiting: take them first
+				if (!drain()) break;
+				continue;
+			}
+			if (sr < 0) failed = true;
+			break;
+		}
+		av_packet_free(&pkt);
+		if (!failed) drain();
+	}
+	if (pkt) av_packet_free(&pkt);
+	if (!failed) return true;
+
+	// The hardware decoder gave up on this stream: software from here on
+	// (it picks up at the next keyframe).
+	dlog("player: the hardware decoder failed; switching to software decoding");
+	hw_.reset();
+	hw_active_ = false;
+	if (!open_stream_codec(video_stream_, &vctx_)) {
+		fail("This video can't be decoded. Pick another stream.");
+		return true;
+	}
+	return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -851,15 +1114,18 @@ void Player::update_buffering() {
 	if (state_ != State::Playing) return;
 	bool has_v = video_stream_ >= 0, has_a = audio_stream_ >= 0 && dev_;
 	if (buffering_) {
+		double target = std::max(kBufferTargets[stalls_], start_target_);
 		double vbuf = has_v ? vq_.duration() : 1e9, abuf = has_a ? aq_.duration() : 1e9;
 		double buf = std::min(vbuf, abuf);
-		buffer_percent_ = int(std::min(100.0, buf / kBufferTarget * 100));
+		buffer_percent_ = int(std::min(100.0, buf / target * 100));
 		bool have_frame;
 		{
 			std::lock_guard<std::mutex> lock(fq_m_);
 			have_frame = !has_v || !frames_.empty();
 		}
-		if (eof_ || (buf >= kBufferTarget && have_frame) || vq_.bytes() + aq_.bytes() > kMaxQueueBytes / 2) {
+		// Also go on when memory is nearly full (a very high bitrate).
+		if (eof_ || (buf >= target && have_frame) || vq_.bytes() + aq_.bytes() > kMaxQueueBytes * 9 / 10) {
+			if (stalls_ > 0) dlog("player: buffered %.1f s, playing again", buf);
 			buffering_ = false;
 			apply_run_state();
 		}
@@ -873,6 +1139,11 @@ void Player::update_buffering() {
 	}
 	if (has_a && aq_.count() == 0 && queued_audio_seconds() < 0.05 && !audio_drained_) starving = true;
 	if (starving) {
+		// The download fell behind: wait longer this time.
+		const int last = int(sizeof(kBufferTargets) / sizeof(kBufferTargets[0])) - 1;
+		if (stalls_ < last) stalls_++;
+		dlog("player: the stream fell behind (stop %d); buffering %.0f s before going on", ++stall_count_,
+		     std::max(kBufferTargets[stalls_], start_target_));
 		buffering_ = true;
 		buffer_percent_ = 0;
 		apply_run_state();
@@ -939,6 +1210,7 @@ void Player::present(SDL_Renderer* renderer) {
 			}
 			if (tex_) SDL_UpdateTexture(tex_, nullptr, f.pixels.data(), f.w * 4);
 			have_picture_ = true;
+			shown_++;
 			// No audio: the first picture after a seek starts the clock.
 			if (audio_stream_ < 0 && pick == 0 && !wall_running_) {
 				std::lock_guard<std::mutex> cl(clock_m_);
@@ -1039,10 +1311,34 @@ std::string Player::codec_summary() const {
 		AVCodecParameters* p = fmt_->streams[vs]->codecpar;
 		std::string c = avcodec_get_name(p->codec_id);
 		for (auto& ch : c) ch = char(toupper((unsigned char)ch));
-		parts.push_back(c + " " + std::to_string(p->width) + "x" + std::to_string(p->height));
+		parts.push_back(c + " " + std::to_string(p->width) + "x" + std::to_string(p->height) +
+		                (hw_active_ ? " (hardware)" : " (software)"));
 	}
 	if (as >= 0) parts.push_back(track_label(as));
 	return join(parts, " · ");
+}
+
+void Player::log_stats() {
+	double now = now_seconds();
+	if (state_ != State::Playing) {
+		log_at_ = 0;
+		return;
+	}
+	if (log_at_ == 0) {  // start counting
+		log_at_ = now;
+		log_shown_ = shown_;
+		log_dropped_ = dropped_;
+		return;
+	}
+	if (now - log_at_ < 30) return;
+	double secs = now - log_at_;
+	int shown = shown_ - log_shown_, dropped = dropped_ - log_dropped_;
+	dlog("player: %s | shown %.1f fps (video %.3g fps), dropped %d in %.0f s, buffered %.1f s%s%s", codec_summary().c_str(),
+	     shown / secs, fps_, dropped, secs, std::max(vq_.duration(), aq_.duration()), paused_ ? ", paused" : "",
+	     buffering_ ? ", buffering" : "");
+	log_at_ = now;
+	log_shown_ = shown_;
+	log_dropped_ = dropped_;
 }
 
 std::string Player::stats() {

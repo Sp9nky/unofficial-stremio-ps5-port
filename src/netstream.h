@@ -18,9 +18,14 @@ struct AVIOContext;
 struct AVFormatContext;
 struct AVDictionary;
 
+// Big files (debrid links, direct URLs) can be fetched by several connections
+// at once ("parallel"): one connection is often what limits the speed, not
+// the line (Wi-Fi caps a single stream, debrid hosts cap each connection).
+// The idea and sizes come from Nuvio PS5's evo_parallel_io.c.
 class NetStream {
 public:
-	NetStream(const std::string& url, const std::vector<std::string>& headers, const std::atomic<bool>* abort);
+	NetStream(const std::string& url, const std::vector<std::string>& headers, const std::atomic<bool>* abort,
+	          bool parallel = false);
 	~NetStream();
 
 	// Starts downloading and waits for the response headers. False on error
@@ -41,7 +46,7 @@ public:
 
 	// An AVIOContext reading this stream; free with close_avio().
 	static AVIOContext* open_avio(const std::string& url, const std::vector<std::string>& headers,
-	                              const std::atomic<bool>* abort, std::string* error);
+	                              const std::atomic<bool>* abort, std::string* error, bool parallel = false);
 	static bool is_ours(AVIOContext* pb);
 	static void close_avio(AVIOContext** pb);
 
@@ -60,6 +65,26 @@ private:
 	void run();
 	bool transfer(int64_t from, int gen);
 	bool stopped() const;
+
+	// Parallel mode: chunks of the file in a window ahead of the reader.
+	struct Chunk {
+		int64_t index = -1;  // which chunk this slot holds
+		int state = 0;       // 0 empty, 1 downloading, 2 ready
+		int attempts = 0;
+		double retry_at = 0;
+		std::vector<uint8_t> data;
+	};
+	void start_parallel();
+	void worker();
+	int read_parallel(std::unique_lock<std::mutex>& lock, uint8_t* buf, int n);
+	bool parallel_wanted_ = false, parallel_ = false;
+	std::string final_url_;  // after redirects, so each chunk goes straight there
+	void* cur_curl_ = nullptr;  // the single download's handle (for its final URL)
+	std::vector<Chunk> chunks_;
+	std::vector<std::thread> workers_;
+	int64_t window_base_ = 0;  // first chunk of the window
+	int64_t par_bytes_ = 0;
+	double par_started_ = 0;
 
 	static size_t on_header(char* data, size_t size, size_t n, void* self);
 	static size_t on_data(char* data, size_t size, size_t n, void* self);

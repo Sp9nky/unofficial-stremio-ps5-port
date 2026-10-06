@@ -85,6 +85,8 @@ struct BoardRow {
 
 struct Settings {
 	std::string server_url;
+	// Torrents: the app's own engine (no server needed), or the server.
+	bool builtin_torrents = true;
 	std::string subtitle_langs = "eng";
 	bool auto_subtitles = true;
 	std::string sub_size = "sub-m";
@@ -305,8 +307,9 @@ private:
 	void input_finish(bool ok);
 
 	// app_watch.cpp
+	// direct: the addon's own link (not through the streaming server)
 	void watch_start(const std::string& url, const std::vector<std::string>& headers, double start,
-	                 const std::string& title, const std::string& subtitle);
+	                 const std::string& title, const std::string& subtitle, bool direct = false);
 	void watch_update();
 	void watch_button(Btn b);
 	void watch_stop(bool ended);

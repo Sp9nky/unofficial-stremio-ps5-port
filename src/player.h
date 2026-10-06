@@ -6,14 +6,18 @@
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
 
+#include "hwdec_ps5.h"
 #include "netstream.h"
 #include "subtitles.h"
+#include "yuv_convert.h"
 
 struct AVFormatContext;
 struct AVCodecContext;
@@ -21,9 +25,10 @@ struct AVPacket;
 struct SwsContext;
 struct SwrContext;
 
-// Plays one URL with FFmpeg (software decoding). Threads: demux, video
-// decode (+ scale to screen size), audio decode (+ resample into SDL's
-// queue). The audio queue is the master clock; without audio, the wall clock.
+// Plays one URL with FFmpeg; video on the PS5's hardware decoder when it
+// takes the stream (hwdec_ps5.h), else FFmpeg's software decoder. Threads:
+// demux, video decode (+ scale to screen size), audio decode (+ resample
+// into SDL's queue). The audio queue is the master clock; without audio, the wall clock.
 // The UI thread calls present() every frame.
 class Player {
 public:
@@ -36,6 +41,9 @@ public:
 		std::vector<std::string> headers;
 		double start = 0;
 		std::vector<std::string> audio_langs;  // preferred, ISO 639-2
+		// A direct link (not the streaming server): a big file may be
+		// downloaded over several connections (netstream.h).
+		bool parallel = false;
 	};
 	enum class State { Idle, Opening, Playing, Ended, Failed };
 
@@ -68,6 +76,8 @@ public:
 
 	std::string stats();
 	std::string codec_summary() const;
+	// Every 30 s while playing: frame rate shown, drops, buffer, decoder (to the log).
+	void log_stats();
 	bool too_heavy() const { return too_heavy_; }
 
 private:
@@ -109,6 +119,12 @@ private:
 	void demux_thread();
 	void demux_run();
 	void video_thread();
+	bool video_thread_hw();  // false: the hardware decoder gave up, carry on in software
+	bool emit_frame(double pts, int serial, const std::function<void(Frame&)>& fill, int src_w, int src_h,
+	                double sar);
+	void hw_to_bgra(const HwDecoder::Picture& pic, Frame& f);
+	bool fast_convert(const YuvPicture& pic, Frame& f);
+	YuvColors colors_ = YuvColors::Bt709;  // of the video being played
 	void audio_thread();
 	void fail(const std::string& msg);
 	bool open_stream_codec(int stream, AVCodecContext** out);
@@ -133,6 +149,10 @@ private:
 	NetStream::IoHooks io_hooks_;
 	std::atomic<int> video_stream_{-1}, audio_stream_{-1};
 	AVCodecContext* vctx_ = nullptr;
+	std::unique_ptr<HwDecoder> hw_;      // the hardware decoder, while it decodes
+	std::atomic<bool> hw_active_{false};  // for the stats line
+	int hw_shift_ = -1;                   // 10-bit samples: shift to 8 bits (2 or 8, found on the first picture)
+	SwsContext* hw_sws_ = nullptr;        // hardware pictures at sizes the fast path doesn't do
 	AVCodecContext* actx_ = nullptr;
 	std::mutex actx_m_;
 	std::map<int, AVCodecContext*> sctx_;
@@ -179,13 +199,19 @@ private:
 	std::atomic<bool> paused_{false};
 	std::atomic<bool> buffering_{true};
 	std::atomic<int> buffer_percent_{0};
+	int stalls_ = 0;       // index into kBufferTargets: grows each time the stream falls behind
+	int stall_count_ = 0;  // for the log
+	double start_target_ = 0;  // seconds to buffer at least, from the file's bitrate
 
 	// Subtitles inside the file
 	mutable std::mutex sub_m_;
 	std::map<int, std::vector<Cue>> embedded_;
 
 	// Stats
-	std::atomic<int> dropped_{0}, decoded_{0};
+	std::atomic<int> dropped_{0}, decoded_{0}, shown_{0};
+	// log_stats(): counts at the previous call
+	double log_at_ = 0;
+	int log_shown_ = 0, log_dropped_ = 0;
 	std::atomic<bool> too_heavy_{false};
 	double heavy_window_start_ = 0;
 	int heavy_window_dropped_ = 0, heavy_window_decoded_ = 0;

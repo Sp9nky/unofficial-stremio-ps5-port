@@ -5,6 +5,8 @@
 
 #include "app.h"
 #include "http.h"
+#include "torrent/engine.h"
+#include "torrent/torrent_stream.h"
 
 static std::string random_id() {
 	static const char* hex = "0123456789abcdef";
@@ -488,7 +490,10 @@ void App::detail_button(Btn b) {
 void App::play_stream(const Stream& st, bool transcode) {
 	std::string srv = server();
 	bool torrent = st.url.empty() && !st.info_hash.empty();
-	if (torrent && srv.empty()) {
+	// Torrents play with the app's own engine, unless Settings says to use
+	// the server; transcoding is always the server's.
+	bool builtin = torrent && !transcode && (settings_.builtin_torrents || srv.empty());
+	if (torrent && !builtin && srv.empty()) {
 		show_toast("Torrent streams need your Stremio streaming server: set it in Settings.", 6);
 		return;
 	}
@@ -531,7 +536,10 @@ void App::play_stream(const Stream& st, bool transcode) {
 	launch_visible = true;
 	launch_title = title;
 	launch_image = art(w_item_.background, ArtKind::Background);
-	launch_status = torrent ? "Preparing torrent..." : transcode ? "Starting transcoding on the server..." : "Opening stream...";
+	launch_status = builtin   ? "Finding peers..."
+	                : torrent ? "Preparing torrent..."
+	                : transcode ? "Starting transcoding on the server..."
+	                            : "Opening stream...";
 	if (start > 0) launch_status += "  Resume at " + format_time(start);
 	dirty_all();
 
@@ -544,16 +552,44 @@ void App::play_stream(const Stream& st, bool transcode) {
 	if (d_series)
 		for (auto& v : d_meta_.videos)
 			if (v.id == w_video_id_) season = v.season, episode = v.episode;
-	if (torrent) torrent_stats_start(srv + "/" + st.info_hash + "/stats.json", st.info_hash);
+	if (builtin) torrent_stats_start(TorrentStream::make_url(st.info_hash, -1), st.info_hash);
+	else if (torrent) torrent_stats_start(srv + "/" + st.info_hash + "/stats.json", st.info_hash);
 	else t_visible = false;
 	auto cancel = std::make_shared<std::atomic<bool>>(false);
 	launch_cancel_ = cancel;
 	Stream s = st;
 	bg<Res>(
-	    [s, srv, torrent, transcode, season, episode, cancel]() {
+	    [s, srv, torrent, builtin, transcode, season, episode, cancel]() {
 		    Res r;
 		    std::string media = s.url;
 		    if (!s.url.empty()) r.headers = s.request_headers;
+		    if (builtin) {
+			    // The app's own engine: start it, wait for the file list (the
+			    // peers send it when the addon gave only the hash), pick the
+			    // file and play it from the engine.
+			    bt::Engine& eng = bt::Engine::get();
+			    eng.start(s.info_hash, s.sources);
+			    std::vector<bt::FileInfo> files;
+			    std::string err;
+			    if (!eng.wait_metadata(s.info_hash, files, cancel.get(), 900, &err)) {
+				    if (err == "cancelled") r.error = "cancelled";
+				    else if (err == "timed out")
+					    r.error = "No peers sent this torrent's file list in 15 minutes. Try another stream.";
+				    else r.error = "The torrent couldn't start (" + err + ").";
+				    return r;
+			    }
+			    int idx = s.file_idx;
+			    if (idx < 0 || size_t(idx) >= files.size()) idx = bt::Engine::guess_file(files, season, episode);
+			    if (idx < 0) {
+				    r.error = "This torrent has no video file.";
+				    return r;
+			    }
+			    dlog("torrent %s: playing file %d, %s", s.info_hash.c_str(), idx, files[size_t(idx)].path.c_str());
+			    eng.select_file(s.info_hash, idx);
+			    r.url = TorrentStream::make_url(s.info_hash, idx);
+			    r.file_idx = idx;
+			    return r;
+		    }
 		    if (torrent) {
 			    // As Stremio's own player does (stremio-video createTorrent):
 			    // with no trackers from the addon and a known file, play the
@@ -630,7 +666,7 @@ void App::play_stream(const Stream& st, bool transcode) {
 		    }
 		    return r;
 	    },
-	    [this, gen, start, title, subtitle, srv, s](Res& r) {
+	    [this, gen, start, title, subtitle, srv, s, builtin](Res& r) {
 		    if (gen != w_gen_ || !launch_visible) return;
 		    if (!r.error.empty()) {
 			    launch_visible = false;
@@ -639,8 +675,9 @@ void App::play_stream(const Stream& st, bool transcode) {
 			    dirty_all();
 			    return;
 		    }
-		    if (r.file_idx >= 0)
+		    if (builtin) t_stats_url_ = r.url;
+		    else if (r.file_idx >= 0)
 			    t_stats_url_ = srv + "/" + s.info_hash + "/" + std::to_string(r.file_idx) + "/stats.json";
-		    watch_start(r.url, r.headers, start, title, subtitle);
+		    watch_start(r.url, r.headers, start, title, subtitle, !s.url.empty() && r.url == s.url);
 	    });
 }

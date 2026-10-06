@@ -10,6 +10,7 @@ extern "C" {
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <functional>
 
 #include "http.h"
 #include "util.h"
@@ -19,6 +20,14 @@ namespace {
 const size_t kMaxBuffered = 16u << 20;   // read-ahead
 const int64_t kSkipWindow = 1 << 20;    // forward seeks shorter than this read on
 const int kRetries = 20;  // slow torrents: keep trying, as the PC app does (Circle stops)
+
+// Parallel mode (Nuvio PS5's numbers): files from 96 MB, 4 MB chunks, six
+// connections, up to 32 chunks (128 MB) held around the reader.
+const int64_t kParallelMin = 96ll << 20;
+const int64_t kChunk = 4ll << 20;
+const int kWindow = 32;
+const int kWorkers = 6;
+const int kChunkAttempts = 8;
 
 int read_cb(void* opaque, uint8_t* buf, int n) { return static_cast<NetStream*>(opaque)->read(buf, n); }
 int64_t seek_cb(void* opaque, int64_t offset, int whence) {
@@ -50,8 +59,9 @@ int io_close_cb(AVFormatContext* s, AVIOContext* pb) {
 
 }  // namespace
 
-NetStream::NetStream(const std::string& url, const std::vector<std::string>& headers, const std::atomic<bool>* abort)
-    : url_(url), headers_(headers), abort_(abort) {}
+NetStream::NetStream(const std::string& url, const std::vector<std::string>& headers, const std::atomic<bool>* abort,
+                     bool parallel)
+    : url_(url), headers_(headers), abort_(abort), parallel_wanted_(parallel) {}
 
 NetStream::~NetStream() {
 	{
@@ -61,6 +71,8 @@ NetStream::~NetStream() {
 	}
 	cv_.notify_all();
 	if (thread_.joinable()) thread_.join();
+	for (auto& w : workers_)
+		if (w.joinable()) w.join();
 }
 
 bool NetStream::stopped() const { return stop_ || (abort_ && abort_->load()); }
@@ -77,7 +89,169 @@ bool NetStream::start() {
 		}
 		cv_.wait_for(lock, std::chrono::milliseconds(100));
 	}
+	// A big file from a server that takes byte ranges: several connections.
+	if (error_.empty() && parallel_wanted_ && size_ >= kParallelMin && status_ == 206) start_parallel();
 	return error_.empty();
+}
+
+// ---------------------------------------------------------------------------
+// Parallel mode
+
+void NetStream::start_parallel() {  // m_ held
+	// Stop the single download (it has served its purpose: the size, the
+	// final URL and that ranges work) and drop what it brought.
+	gen_++;
+	started_gen_ = gen_;
+	buf_.clear();
+	head_ = 0;
+	discard_ = 0;
+	eof_ = false;
+	parallel_ = true;
+	chunks_.assign(kWindow, Chunk());
+	window_base_ = pos_ / kChunk;
+	par_started_ = now_seconds();
+	par_bytes_ = 0;
+	if (final_url_.empty()) final_url_ = url_;
+	for (int i = 0; i < kWorkers; i++) workers_.emplace_back([this] { worker(); });
+	dlog("net: %lld MB file, downloading with %d connections", (long long)(size_ >> 20), kWorkers);
+}
+
+namespace {
+struct ChunkFetch {
+	std::vector<uint8_t>* data;
+	size_t expect;
+	std::function<bool()> keep_going;
+};
+size_t chunk_data(char* p, size_t size, size_t n, void* ud) {
+	auto* f = static_cast<ChunkFetch*>(ud);
+	size_t len = size * n;
+	if (f->data->size() + len > f->expect) return 0;  // more than asked for: not a range answer
+	f->data->insert(f->data->end(), p, p + len);
+	return len;
+}
+int chunk_progress(void* ud, curl_off_t, curl_off_t, curl_off_t, curl_off_t) {
+	return static_cast<ChunkFetch*>(ud)->keep_going() ? 0 : 1;
+}
+}  // namespace
+
+void NetStream::worker() {
+	CURL* c = curl_easy_init();  // kept: the connection is reused for the next chunk
+	std::unique_lock<std::mutex> lock(m_);
+	while (c && !stopped()) {
+		// The first chunk of the window that nobody has or is fetching.
+		double now = now_seconds();
+		int64_t last = (size_ - 1) / kChunk;
+		int64_t pick = -1;
+		for (int64_t i = window_base_; i < window_base_ + kWindow && i <= last; i++) {
+			Chunk& s = chunks_[size_t(i % kWindow)];
+			if (s.state == 1) continue;  // busy (this chunk, or an old one still finishing)
+			if (s.index == i && s.state == 2) continue;
+			if (s.index == i && now < s.retry_at) continue;
+			pick = i;
+			break;
+		}
+		if (pick < 0) {
+			cv_.wait_for(lock, std::chrono::milliseconds(100));
+			continue;
+		}
+		Chunk& slot = chunks_[size_t(pick % kWindow)];
+		if (slot.index != pick) slot.attempts = 0;
+		slot.index = pick;
+		slot.state = 1;
+		slot.data.clear();
+		int64_t from = pick * kChunk, to = std::min(size_, from + kChunk) - 1;
+		std::string url = final_url_;
+		lock.unlock();
+
+		std::vector<uint8_t> data;
+		data.reserve(size_t(to - from + 1));
+		ChunkFetch f{&data, size_t(to - from + 1), [this, pick] {
+			            std::lock_guard<std::mutex> l(m_);
+			            // Give up when closed, or when a seek left this chunk behind.
+			            return !stopped() && pick >= window_base_ && pick < window_base_ + kWindow;
+		            }};
+		char errbuf[CURL_ERROR_SIZE] = {0};
+		struct curl_slist* hdrs = nullptr;
+		for (auto& h : headers_) hdrs = curl_slist_append(hdrs, h.c_str());
+		std::string range = std::to_string(from) + "-" + std::to_string(to);
+		curl_easy_reset(c);
+		curl_easy_setopt(c, CURLOPT_URL, url.c_str());
+		curl_easy_setopt(c, CURLOPT_RANGE, range.c_str());
+		curl_easy_setopt(c, CURLOPT_USERAGENT, kUserAgent);
+		curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L);
+		curl_easy_setopt(c, CURLOPT_MAXREDIRS, 8L);
+		curl_easy_setopt(c, CURLOPT_NOSIGNAL, 1L);
+		curl_easy_setopt(c, CURLOPT_IPRESOLVE, CURL_IPRESOLVE_V4);
+		curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 15L);
+		curl_easy_setopt(c, CURLOPT_LOW_SPEED_LIMIT, 1L);
+		curl_easy_setopt(c, CURLOPT_LOW_SPEED_TIME, 30L);
+		curl_easy_setopt(c, CURLOPT_ERRORBUFFER, errbuf);
+		curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, chunk_data);
+		curl_easy_setopt(c, CURLOPT_WRITEDATA, &f);
+		curl_easy_setopt(c, CURLOPT_NOPROGRESS, 0L);
+		curl_easy_setopt(c, CURLOPT_XFERINFOFUNCTION, chunk_progress);
+		curl_easy_setopt(c, CURLOPT_XFERINFODATA, &f);
+		if (!http_ca_bundle().empty() && file_exists(http_ca_bundle()))
+			curl_easy_setopt(c, CURLOPT_CAINFO, http_ca_bundle().c_str());
+		http_setup_handle(c);
+		if (hdrs) curl_easy_setopt(c, CURLOPT_HTTPHEADER, hdrs);
+		CURLcode rc = curl_easy_perform(c);
+		long status = 0;
+		curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &status);
+		if (hdrs) curl_slist_free_all(hdrs);
+
+		lock.lock();
+		if (slot.index != pick) continue;  // not ours any more
+		if (rc == CURLE_OK && status == 206 && data.size() == size_t(to - from + 1)) {
+			slot.data = std::move(data);
+			slot.state = 2;
+			par_bytes_ += to - from + 1;
+			if (par_bytes_ >> 26 != (par_bytes_ - (to - from + 1)) >> 26) {  // every 64 MB
+				double secs = std::max(0.1, now_seconds() - par_started_);
+				dlog("net: %lld MB in %.0f s with %d connections (%.1f MB/s)", (long long)(par_bytes_ >> 20), secs,
+				     kWorkers, par_bytes_ / secs / (1 << 20));
+			}
+		} else {
+			slot.state = 0;
+			if (!stopped() && pick >= window_base_ && pick < window_base_ + kWindow) {
+				slot.attempts++;
+				slot.retry_at = now_seconds() + std::min(8, slot.attempts);
+				std::string why = status >= 400 ? "HTTP " + std::to_string(status)
+				                  : errbuf[0]    ? std::string(errbuf)
+				                                 : curl_easy_strerror(rc);
+				dlog("net: chunk %lld: %s (attempt %d)", (long long)pick, why.c_str(), slot.attempts);
+				if (slot.attempts >= kChunkAttempts || (status >= 400 && status < 500)) error_ = why;
+			}
+		}
+		cv_.notify_all();
+	}
+	lock.unlock();
+	if (c) curl_easy_cleanup(c);
+}
+
+int NetStream::read_parallel(std::unique_lock<std::mutex>& lock, uint8_t* buf, int n) {
+	for (;;) {
+		if (abort_ && abort_->load()) return AVERROR_EXIT;
+		if (pos_ >= size_) return AVERROR_EOF;
+		int64_t idx = pos_ / kChunk;
+		// The window follows the reader, one chunk kept behind it for short
+		// steps back; a jump outside it starts a new one there.
+		int64_t base = idx < window_base_ || idx >= window_base_ + kWindow ? idx : std::max(window_base_, idx - 1);
+		if (base != window_base_) {
+			window_base_ = base;
+			cv_.notify_all();
+		}
+		Chunk& s = chunks_[size_t(idx % kWindow)];
+		if (s.index == idx && s.state == 2) {
+			size_t off = size_t(pos_ - idx * kChunk);
+			size_t k = std::min(size_t(n), s.data.size() - off);
+			memcpy(buf, s.data.data() + off, k);
+			pos_ += int64_t(k);
+			return int(k);
+		}
+		if (!error_.empty()) return AVERROR(EIO);
+		cv_.wait_for(lock, std::chrono::milliseconds(100));
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -144,8 +318,13 @@ bool NetStream::transfer(int64_t from, int gen) {
 			std::lock_guard<std::mutex> lock(m_);
 			discard_ = 0;
 			range_from_ = from;
+			cur_curl_ = c;
 		}
 		CURLcode rc = curl_easy_perform(c);
+		{
+			std::lock_guard<std::mutex> lock(m_);
+			cur_curl_ = nullptr;
+		}
 		long status = 0;
 		curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &status);
 		if (hdrs) curl_slist_free_all(hdrs);
@@ -204,6 +383,10 @@ size_t NetStream::on_header(char* data, size_t size, size_t n, void* self) {
 		if (s->status_ >= 200 && s->status_ < 300) {
 			s->header_ok_ = true;
 			s->headers_done_ = true;
+			char* eff = nullptr;
+			if (s->cur_curl_ && curl_easy_getinfo(static_cast<CURL*>(s->cur_curl_), CURLINFO_EFFECTIVE_URL, &eff) == CURLE_OK &&
+			    eff)
+				s->final_url_ = eff;
 			// 200 instead of 206: the server ignored Range and sends the
 			// whole file, so drop everything before where we asked to start.
 			if (s->status_ == 200 && s->range_from_ > 0) s->discard_ = s->range_from_;
@@ -252,6 +435,7 @@ int NetStream::on_progress(void* self, int64_t, int64_t, int64_t, int64_t) {
 
 int NetStream::read(uint8_t* buf, int n) {
 	std::unique_lock<std::mutex> lock(m_);
+	if (parallel_) return read_parallel(lock, buf, n);
 	for (;;) {
 		if (abort_ && abort_->load()) return AVERROR_EXIT;
 		size_t avail = buf_.size() - head_;
@@ -272,6 +456,19 @@ int NetStream::read(uint8_t* buf, int n) {
 
 std::string NetStream::peek(size_t n) {
 	std::unique_lock<std::mutex> lock(m_);
+	if (parallel_) {
+		std::string out(n, '\0');
+		int64_t keep = pos_;
+		size_t got = 0;
+		while (got < n) {
+			int k = read_parallel(lock, reinterpret_cast<uint8_t*>(&out[got]), int(n - got));
+			if (k <= 0) break;
+			got += size_t(k);
+		}
+		pos_ = keep;
+		out.resize(got);
+		return out;
+	}
 	while (buf_.size() - head_ < n && error_.empty() && !eof_ && !(abort_ && abort_->load()))
 		cv_.wait_for(lock, std::chrono::milliseconds(100));
 	size_t k = std::min(n, buf_.size() - head_);
@@ -295,6 +492,11 @@ int64_t NetStream::seek(int64_t offset, int whence) {
 	else if (whence == SEEK_END && size_ >= 0) target = size_ + offset;
 	else return AVERROR(EINVAL);
 	if (target < 0) return AVERROR(EINVAL);
+	if (parallel_) {  // the next read moves the window there
+		pos_ = target;
+		cv_.notify_all();
+		return target;
+	}
 
 	int64_t avail = int64_t(buf_.size() - head_);
 	int64_t end = pos_ + avail;  // first byte not yet downloaded
@@ -336,8 +538,8 @@ int64_t NetStream::seek(int64_t offset, int whence) {
 // FFmpeg glue
 
 AVIOContext* NetStream::open_avio(const std::string& url, const std::vector<std::string>& headers,
-                                  const std::atomic<bool>* abort, std::string* error) {
-	auto* ns = new NetStream(url, headers, abort);
+                                  const std::atomic<bool>* abort, std::string* error, bool parallel) {
+	auto* ns = new NetStream(url, headers, abort, parallel);
 	if (!ns->start()) {
 		if (error) *error = ns->error();
 		delete ns;

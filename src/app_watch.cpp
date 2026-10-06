@@ -5,14 +5,17 @@
 
 #include "app.h"
 #include "http.h"
+#include "torrent/engine.h"
+#include "torrent/torrent_stream.h"
 
 static const double kInfoSeconds = 5;
 static const double kSaveEvery = 30;
 
 void App::watch_start(const std::string& url, const std::vector<std::string>& headers, double start,
-                      const std::string& title, const std::string& subtitle) {
+                      const std::string& title, const std::string& subtitle, bool direct) {
 	Player::Options o;
 	o.url = url;
+	o.parallel = direct;
 	o.headers = headers;
 	o.start = start;
 	o.audio_langs = pref_audio_langs();
@@ -75,10 +78,23 @@ void App::torrent_stats_poll() {
 	struct Stats {
 		bool ok = false;
 		double peers = 0, speed = 0, progress = -1;
+		int known = -1;  // built-in engine only
+		bool has_meta = false, incoming = false;
 	};
 	g_tasks.run<Stats>(
 	    [url]() {
 		    Stats s;
+		    if (TorrentStream::is_url(url)) {  // the built-in engine
+			    bt::Stats es = bt::Engine::get().stats(url.substr(10, 40));
+			    s.ok = es.found;
+			    s.peers = es.peers;
+			    s.speed = es.download_rate;
+			    s.progress = es.file_progress;
+			    s.known = es.known_peers;
+			    s.has_meta = es.has_metadata;
+			    s.incoming = es.incoming;
+			    return s;
+		    }
 		    HttpResponse h = http_get(url, 5);
 		    if (!h.ok()) return s;
 		    json j = json::parse(h.body, nullptr, false);
@@ -104,6 +120,14 @@ void App::torrent_stats_poll() {
 		    dirty("t_peers");
 		    dirty("t_speed");
 		    dirty("t_progress");
+		    // Built-in engine, before playback starts: say what it's waiting for.
+		    if (s.known >= 0 && launch_visible && !watching_ && !s.has_meta) {
+			    if (s.known == 0) launch_status = "Finding peers...";
+			    else if (s.peers == 0)
+				    launch_status = "Finding peers... " + std::to_string(s.known) + " found, none answering yet";
+			    else launch_status = "Getting the file list from " + std::to_string(int(s.peers)) + " peers...";
+			    dirty("launch_status");
+		    }
 	    });
 }
 
@@ -118,6 +142,7 @@ void App::watch_show_info() {
 void App::watch_update() {
 	double now = now_seconds();
 	Player::State st = player_.state();
+	player_.log_stats();
 
 	if (st == Player::State::Failed) {
 		std::string err = player_.error();

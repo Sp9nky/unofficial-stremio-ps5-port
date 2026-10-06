@@ -19,6 +19,7 @@
 #endif
 #include "artcache.h"
 #include "http.h"
+#include "hwdec_ps5.h"
 #include "render_sdl.h"
 #include "tasks.h"
 #include "util.h"
@@ -161,6 +162,7 @@ int main(int argc, char** argv) {
 
 #ifdef PLATFORM_PS5_NATIVE
 	ps5_load_modules();  // the on-screen keyboard, before SDL polls it
+	HwDecoder::load_module();  // the hardware video decoder
 #endif
 	SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "1");
 #ifdef PLATFORM_PS5
