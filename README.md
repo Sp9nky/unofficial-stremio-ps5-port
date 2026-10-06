@@ -17,6 +17,20 @@ watch it, all with the DualSense.
 > Interactive Entertainment Inc. No Sony code, SDK, keys or firmware files
 > are included.
 
+## What's new in 0.3.0
+
+Fewer buffering stops:
+
+- **Long read-ahead on the console's storage**: the app now uses up to
+  16 GB of the PS5's storage. Built-in torrents keep a 6 GB cache and
+  download up to 3 GB (about a quarter of an hour of 4K) ahead of what
+  you're watching; streams from a streaming server or a direct link keep up
+  to 6 GB ahead.
+- **Six connections for streaming-server streams** too (before, only direct
+  links): one connection from a server measured 3-6 MB/s, six about 8 MB/s.
+- If a source is slower than the video itself (a torrent with few seeders),
+  it can still stop: pick a stream with more seeders or a smaller file.
+
 ## What's new in 0.2.0
 
 - **Streams directly on the console**: a built-in torrent engine (trackers,
@@ -66,8 +80,8 @@ To update, close Stremio first, delete the old `PPSA77711.ffpfsc`, wait a few
 seconds, then copy the new one. (If the image is replaced while the app is
 running, the console keeps the old icon and backgrounds.)
 
-The app keeps its settings, artwork cache, torrent cache and log in its own
-storage (`/download0/stremio`).
+The app keeps its settings, artwork cache, read-ahead caches and log in its
+own storage (`/download0/stremio`, up to 16 GB).
 
 ## Controls
 
