@@ -38,6 +38,11 @@ for f in shims console_curl ps5_modules heap posix_fixes; do
 	"$CC" -O2 -I"$SDK/target/user/homebrew/include" -c "$HERE/$f.c" -o "$B/$f.o"
 done
 
+# System modules the SDK has no link stub for (native/stubs/).
+mkdir -p "$B/stubs"
+"$CC" -shared -nostdlib -fPIC -Wl,-soname,libSceVideodec2.sprx "$HERE/stubs/videodec2.c" \
+	-o "$B/stubs/libSceVideodec2.so"
+
 echo ">> linking"
 # Every library Stremio uses, in static form (stub .so for system modules).
 read -r -a DEPS <<< "$("$SDK/bin/prospero-pkg-config" --static --libs \
@@ -62,17 +67,18 @@ read -r -a DEPS <<< "$("$SDK/bin/prospero-pkg-config" --static --libs \
 	"$B/app_crt.o" "$B/shims.o" "$B/console_curl.o" "$B/ps5_modules.o" "$B/heap.o" "$B/posix_fixes.o" \
 	--whole-archive "$B/cmake/libstremio.a" --no-whole-archive \
 	--start-group \
-	"$HB/librmlui.a" "${DEPS[@]}" \
+	"$HB/librmlui.a" "$HB/libdht.a" "$HB/libminiupnpc.a" "${DEPS[@]}" \
 	"$SDK/target/lib/libc++.a" "$SDK/target/lib/libc++abi.a" "$SDK/target/lib/libunwind.a" \
 	"$SDK/target/lib/libc.a" \
 	--end-group \
-	--as-needed "$SDK"/target/lib/*.so
+	--as-needed "$SDK"/target/lib/*.so "$B"/stubs/*.so
 
 # A function that resolves to a module the PS5 doesn't load into an app is a
 # call to address 0 at run time. List them (they need a definition in native/).
-python3 "$HERE/check_imports.py" "$B/pie.elf" "$SDK/target/lib"
+python3 "$HERE/check_imports.py" "$B/pie.elf" "$SDK/target/lib" "$B/stubs"
 
 "$TOOL" link --in "$B/pie.elf" --out "$B/eboot.elf" --stub-dir "$SDK/target/lib" \
+	--stub "$B/stubs/libSceVideodec2.so" \
 	--module-sdk 0x02000009 --companion-sdk 0x08050001 --file-name eboot.elf >/dev/null
 
 echo ">> packaging $TITLE"

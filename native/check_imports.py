@@ -2,7 +2,7 @@
 """Lists functions the native app imports from modules the PS5 doesn't load
 into an app. Those imports stay at address 0, so calling one crashes.
 
-usage: check_imports.py <linked pie.elf> <sdk target/lib>
+usage: check_imports.py <linked pie.elf> <sdk target/lib> [<more stub dirs>...]
 
 The loaded set is what the kernel log listed for a native media app on 11.60
 (the module list printed with a crash)."""
@@ -16,8 +16,9 @@ LOADED = {
     "libSceSsl", "libSceHttpCache", "libSceHttp", "libSceHttp2", "libSceNpCommon",
     "libSceNpManager", "libSceNpGameIntent", "libSceNpWebApi2", "libSceSaveData",
     "libSceSystemService", "libSceUserService", "libSceCommonDialog", "libSceSysUtil",
-    # Loaded by the app itself before first use (native/ps5_modules.c).
-    "libSceImeDialog",
+    # Loaded by the app itself before first use (native/ps5_modules.c,
+    # src/hwdec_ps5.cpp).
+    "libSceImeDialog", "libSceVideodec2",
 }
 
 NM = "llvm-nm-18"
@@ -29,10 +30,11 @@ def symbols(path, *flags):
 
 
 def main():
-    pie, libdir = sys.argv[1], sys.argv[2]
+    pie, libdirs = sys.argv[1], sys.argv[2:]
     wanted = symbols(pie, "-D", "--undefined-only")
     owner = {}
-    for so in sorted(glob.glob(os.path.join(libdir, "*.so"))):  # the link's search order
+    stubs = [so for d in libdirs for so in sorted(glob.glob(os.path.join(d, "*.so")))]
+    for so in stubs:  # the link's search order
         module = os.path.basename(so)[:-3]
         for name in symbols(so, "-D", "--defined-only") & wanted:
             owner.setdefault(name, module)

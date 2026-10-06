@@ -44,6 +44,8 @@ int sceKernelAllocateDirectMemory(int64_t search_start, int64_t search_end, size
 int sceKernelMapDirectMemory(void** address, size_t length, int protection, int flags,
                              int64_t start, size_t alignment);
 int sceKernelReleaseDirectMemory(int64_t start, size_t length);
+int sceKernelAvailableDirectMemorySize(int64_t search_start, int64_t search_end, size_t alignment,
+                                       int64_t* start_out, size_t* size_out);
 int sceKernelDebugOutText(int channel, const char* text);
 
 static mspace g_heap;
@@ -75,10 +77,26 @@ static void* map_direct(size_t size) {
 	return NULL;
 }
 
+// Direct memory left for everything else: the hardware video decoder maps
+// its buffers there (about 550 MB for a 4K stream, Nuvio PS5's measurement),
+// and a media app only gets about 2.3 GB of direct memory in all
+// (klog: "DMEM size: 0x90000000"). A 2 GB heap left the decoder short.
+#define RESERVE_MB 800
+
 static void heap_init(void) {
-	static const size_t sizes_mb[] = {2048, 1536, 1024, 768, 512, 256};
+	static const size_t sizes_mb[] = {2048, 1792, 1536, 1280, 1024, 768, 512, 256};
+	int64_t total = sceKernelGetDirectMemorySize(), avail_start = 0;
+	size_t avail = 0;
+	if (sceKernelAvailableDirectMemorySize(0, total, 0x4000, &avail_start, &avail) != 0) avail = 0;
+	heap_log("[stremio] heap: direct memory %lld MB, %lld MB free\n", (long long)(total >> 20),
+	         (long long)(avail >> 20));
+	// Sized from the total (the free figure is one free block, not all of
+	// them): 2.3 GB - 800 MB gives a 1280 MB heap.
+	size_t cap = total > ((int64_t)(RESERVE_MB + 768) << 20) ? (size_t)total - ((size_t)RESERVE_MB << 20)
+	                                                          : (size_t)768 << 20;
 	for (unsigned i = 0; i < sizeof(sizes_mb) / sizeof(sizes_mb[0]); i++) {
 		size_t size = sizes_mb[i] << 20;
+		if (size > cap) continue;
 		void* base = map_direct(size);
 		if (!base) continue;
 		g_heap = create_mspace_with_base(base, size, 1);
