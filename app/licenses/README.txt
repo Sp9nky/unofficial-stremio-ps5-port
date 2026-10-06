@@ -31,6 +31,7 @@ zstd                                       BSD-3-Clause                    zstd.
 xz / liblzma                               0BSD                            xz.txt, xz-0BSD.txt
 bzip2                                      bzip2 License                   bzip2.txt
 GNU libiconv                               LGPL-2.1-or-later               LGPL-2.1.txt
+GNU FriBidi                                LGPL-2.1-or-later               LGPL-2.1.txt
 dlmalloc (Doug Lea)                        MIT-0                           dlmalloc.txt
 nlohmann/json (Niels Lohmann)              MIT                             nlohmann-json.txt
 dht (Juliusz Chroboczek)                   MIT                             dht.txt
@@ -38,6 +39,7 @@ stb_image (Sean Barrett)                   MIT / public domain             stb_i
 Stremio icons, stremio-video               MIT                             Stremio-MIT.txt
 dashboard-icons (logo)                     Apache-2.0                      dashboard-icons.txt
 Noto Sans, Noto Emoji (Google)             SIL OFL 1.1                     ../fonts/OFL.txt
+Noto Naskh Arabic UI (Google)              SIL OFL 1.1                     ../fonts/NotoNaskhArabicUI-NOTICE.txt
 
 "Stremio" and the Stremio logo are trademarks of their owner, used only to
 identify the service this unofficial client connects to. This app is not
