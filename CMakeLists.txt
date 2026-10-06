@@ -32,6 +32,7 @@ set(STREMIO_SOURCES
     src/app_settings.cpp
     src/app_watch.cpp
     src/artcache.cpp
+    src/bidi.cpp
     src/http.cpp
     src/hwdec_ps5.cpp
     src/player.cpp
@@ -50,10 +51,11 @@ set(STREMIO_SOURCES
 # PS5 is set by the payload SDK's toolchain file (toolchain/prospero.cmake).
 if(PS5 AND PS5_NATIVE)
     add_library(stremio STATIC ${STREMIO_SOURCES} src/pad_ps5.cpp)
-    # The torrent engine's DHT and router port mapping: PacBrew's libdht and
-    # libminiupnpc (linked by native/build.sh).
+    # The torrent engine's DHT and router port mapping (PacBrew's libdht and
+    # libminiupnpc) and right-to-left subtitles (libfribidi): linked by
+    # native/build.sh.
     target_compile_definitions(stremio PRIVATE PLATFORM_PS5=1 PLATFORM_PS5_NATIVE=1 HAVE_DHT=1 HAVE_UPNP=1
-                               MINIUPNP_STATICLIB)
+                               MINIUPNP_STATICLIB HAVE_FRIBIDI=1)
 elseif(PS5)
     message(FATAL_ERROR "the PS5 app is built by native/build.sh (PS5_NATIVE=ON)")
 else()
@@ -84,5 +86,10 @@ if(NOT PS5_NATIVE)
     if(DHT_LIBRARY)
         target_compile_definitions(stremio PRIVATE HAVE_DHT=1)
         target_link_libraries(stremio PRIVATE ${DHT_LIBRARY})
+    endif()
+    pkg_check_modules(FRIBIDI IMPORTED_TARGET fribidi)
+    if(FRIBIDI_FOUND)
+        target_compile_definitions(stremio PRIVATE HAVE_FRIBIDI=1)
+        target_link_libraries(stremio PRIVATE PkgConfig::FRIBIDI)
     endif()
 endif()

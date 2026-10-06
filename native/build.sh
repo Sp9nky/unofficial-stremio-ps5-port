@@ -67,7 +67,7 @@ read -r -a DEPS <<< "$("$SDK/bin/prospero-pkg-config" --static --libs \
 	"$B/app_crt.o" "$B/shims.o" "$B/console_curl.o" "$B/ps5_modules.o" "$B/heap.o" "$B/posix_fixes.o" \
 	--whole-archive "$B/cmake/libstremio.a" --no-whole-archive \
 	--start-group \
-	"$HB/librmlui.a" "$HB/libdht.a" "$HB/libminiupnpc.a" "${DEPS[@]}" \
+	"$HB/librmlui.a" "$HB/libdht.a" "$HB/libminiupnpc.a" "$HB/libfribidi.a" "${DEPS[@]}" \
 	"$SDK/target/lib/libc++.a" "$SDK/target/lib/libc++abi.a" "$SDK/target/lib/libunwind.a" \
 	"$SDK/target/lib/libc.a" \
 	--end-group \
