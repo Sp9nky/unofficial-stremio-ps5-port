@@ -62,9 +62,9 @@ const double kHandshakeTimeout = 15;
 const double kRequestTimeout = 15;   // a block not here by then is asked from someone else
 const double kChokedTimeout = 60;    // a peer that keeps us choked this long makes room for another
 const uint32_t kMaxMessage = 2u << 20;
-// How far ahead of the player to download: half the 1 GB cache, about three
-// minutes of a 4K remux, to ride out a slow patch in the swarm.
-const int64_t kMaxReadahead = 512ll << 20;
+// How far ahead of the player to download: half the 6 GB cache, about a
+// quarter of an hour of a 4K remux, to ride out slow patches in the swarm.
+const int64_t kMaxReadahead = 3ll << 30;
 const int64_t kMaxActiveBytes = 128ll << 20;  // pieces being assembled in memory
 const int64_t kMaxRamCache = 384ll << 20;     // when the cache file can't be used
 const double kPauseAfter = 45;       // no reader for this long: stop downloading
