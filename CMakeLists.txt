@@ -33,6 +33,7 @@ set(STREMIO_SOURCES
     src/app_watch.cpp
     src/artcache.cpp
     src/http.cpp
+    src/hwdec_ps5.cpp
     src/player.cpp
     src/netstream.cpp
     src/render_sdl.cpp
@@ -40,12 +41,19 @@ set(STREMIO_SOURCES
     src/subtitles.cpp
     src/tasks.cpp
     src/util.cpp
+    src/yuv_convert.cpp
+    src/torrent/bencode.cpp
+    src/torrent/engine.cpp
+    src/torrent/torrent_stream.cpp
 )
 
 # PS5 is set by the payload SDK's toolchain file (toolchain/prospero.cmake).
 if(PS5 AND PS5_NATIVE)
     add_library(stremio STATIC ${STREMIO_SOURCES} src/pad_ps5.cpp)
-    target_compile_definitions(stremio PRIVATE PLATFORM_PS5=1 PLATFORM_PS5_NATIVE=1)
+    # The torrent engine's DHT and router port mapping: PacBrew's libdht and
+    # libminiupnpc (linked by native/build.sh).
+    target_compile_definitions(stremio PRIVATE PLATFORM_PS5=1 PLATFORM_PS5_NATIVE=1 HAVE_DHT=1 HAVE_UPNP=1
+                               MINIUPNP_STATICLIB)
 elseif(PS5)
     message(FATAL_ERROR "the PS5 app is built by native/build.sh (PS5_NATIVE=ON)")
 else()
@@ -67,4 +75,14 @@ target_link_libraries(stremio PRIVATE
 )
 if(TARGET SDL2::SDL2main AND NOT PS5_NATIVE)
     target_link_libraries(stremio PRIVATE SDL2::SDL2main)
+endif()
+if(NOT PS5_NATIVE)
+    # The torrent engine hashes with OpenSSL; it uses the DHT when libdht is there.
+    find_package(OpenSSL REQUIRED)
+    target_link_libraries(stremio PRIVATE OpenSSL::Crypto)
+    find_library(DHT_LIBRARY dht)
+    if(DHT_LIBRARY)
+        target_compile_definitions(stremio PRIVATE HAVE_DHT=1)
+        target_link_libraries(stremio PRIVATE ${DHT_LIBRARY})
+    endif()
 endif()
