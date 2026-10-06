@@ -95,7 +95,7 @@ if title != "PPSA77711":
     p["titleId"] = title
     p["conceptId"] = title[4:]
     p["contentId"] = "UP9000-%s_00-STREMIOPS5TEST%s" % (title, title[-2:])  # 16 characters
-p["downloadDataSize"] = 2048   # MB of app storage: settings, artwork cache, log
+p["downloadDataSize"] = 16384  # MB of app storage: read-ahead caches (6 + 6 GB), artwork, settings, log
 p["localizedParameters"]["en-US"]["titleName"] = sys.argv[4]
 json.dump(p, open(sys.argv[2], "w"), indent=2)
 PY
