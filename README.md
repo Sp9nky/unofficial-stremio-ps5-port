@@ -26,6 +26,29 @@ watch it, all with the DualSense.
 > Interactive Entertainment Inc. No Sony code, SDK, keys or firmware files
 > are included.
 
+## Screenshots
+
+<table>
+  <tr>
+    <td width="50%"><a href="docs/screenshots/home.jpg"><img src="docs/screenshots/home.jpg" alt="The home screen"></a><br><sub><b>Home</b>: the wallpaper of the title you are on, and your rows</sub></td>
+    <td width="50%"><a href="docs/screenshots/continue-watching.jpg"><img src="docs/screenshots/continue-watching.jpg" alt="Continue Watching"></a><br><sub><b>Continue Watching</b>: play now, or choose another episode or stream</sub></td>
+  </tr>
+  <tr>
+    <td width="50%"><a href="docs/screenshots/discover.jpg"><img src="docs/screenshots/discover.jpg" alt="Discover"></a><br><sub><b>Discover</b>: browse any catalog, with a preview</sub></td>
+    <td width="50%"><a href="docs/screenshots/library.jpg"><img src="docs/screenshots/library.jpg" alt="Library"></a><br><sub><b>Library</b>: everything you saved or watched</sub></td>
+  </tr>
+  <tr>
+    <td width="50%"><a href="docs/screenshots/episodes.jpg"><img src="docs/screenshots/episodes.jpg" alt="Episodes"></a><br><sub><b>Episodes</b>: seasons, what you have watched, where you stopped</sub></td>
+    <td width="50%"><a href="docs/screenshots/streams.jpg"><img src="docs/screenshots/streams.jpg" alt="Streams"></a><br><sub><b>Streams</b>: grouped by resolution, with size and seeds</sub></td>
+  </tr>
+  <tr>
+    <td width="50%"><a href="docs/screenshots/player.jpg"><img src="docs/screenshots/player.jpg" alt="The player"></a><br><sub><b>Player</b>: subtitles, audio tracks, seeking</sub></td>
+    <td width="50%"><a href="docs/screenshots/search.jpg"><img src="docs/screenshots/search.jpg" alt="Search"></a><br><sub><b>Search</b>: with the PS5's own keyboard</sub></td>
+  </tr>
+</table>
+
+The titles and artwork in these pictures are invented (made by `tools/preview`).
+
 ## What's new in 1.0
 
 **A full redesign.** The whole interface is new: it keeps Stremio's look and is
