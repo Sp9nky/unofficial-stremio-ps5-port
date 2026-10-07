@@ -23,9 +23,9 @@ const Matrix kBt709{459, 55, 136, 541}, kBt601{409, 100, 208, 516};
 inline void put_sdr(uint8_t* o, int y10, int u10, int v10, const Matrix& m) {
 	int c = 298 * ((y10 >> 2) - 16) + 128;
 	int u = (u10 >> 2) - 128, v = (v10 >> 2) - 128;
-	o[0] = clamp8((c + m.bu * u) >> 8);
+	o[0] = clamp8((c + m.rv * v) >> 8);
 	o[1] = clamp8((c - m.gu * u - m.gv * v) >> 8);
-	o[2] = clamp8((c + m.rv * v) >> 8);
+	o[2] = clamp8((c + m.bu * u) >> 8);
 	o[3] = 255;
 }
 
@@ -104,15 +104,15 @@ inline void put_hdr(const HdrTables& t, uint8_t* o, int y10, int u10, int v10) {
 	r7 *= k;
 	g7 *= k;
 	b7 *= k;
-	o[0] = hdr_out(t, b7);
+	o[0] = hdr_out(t, r7);
 	o[1] = hdr_out(t, g7);
-	o[2] = hdr_out(t, r7);
+	o[2] = hdr_out(t, b7);
 	o[3] = 255;
 }
 
 }  // namespace
 
-void yuv_to_bgra(const YuvPicture& p, YuvColors colors, int scale, uint8_t* out, int out_w, int row_begin,
+void yuv_to_rgba(const YuvPicture& p, YuvColors colors, int scale, uint8_t* out, int out_w, int row_begin,
                  int row_end) {
 	const HdrTables* t = colors == YuvColors::Hdr10 ? &hdr_tables() : nullptr;
 	const Matrix& m = colors == YuvColors::Bt601 ? kBt601 : kBt709;

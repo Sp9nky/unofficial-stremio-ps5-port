@@ -11,8 +11,10 @@ extern "C" {
 }
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstring>
+#include <thread>
 
 #include "http.h"
 #include "netstream.h"
@@ -22,7 +24,7 @@ extern "C" {
 
 static const int kOutRate = 48000;
 static const int kOutBytesPerSec = kOutRate * 2 * 2;  // s16 stereo
-static const double kMaxQueuedAudio = 0.35;            // seconds kept in SDL's queue
+static const double kMaxQueuedAudio = 0.35;            // seconds kept queued for output
 // Seconds buffered before playback starts. Each time the download falls
 // behind and playback has to stop, the next wait is longer (up to 30 s), so a
 // stream that's barely fast enough stops a few times for longer instead of
@@ -32,6 +34,8 @@ static const double kBufferTargets[] = {2, 5, 10, 20, 30};
 static const size_t kMaxQueueBytes = 256u << 20;
 static const int kMaxFrames = 4;
 static const int kScreenW = 1920, kScreenH = 1080;
+
+static void delay_ms(int ms) { std::this_thread::sleep_for(std::chrono::milliseconds(ms)); }
 
 static std::string av_err(int err) {
 	char buf[AV_ERROR_MAX_STRING_SIZE] = {0};
@@ -183,16 +187,9 @@ void Player::close() {
 	aq_.abort();
 	fq_cv_.notify_all();
 	if (demux_.joinable()) demux_.join();  // joins the decoder threads too
-	if (dev_) {
-		SDL_CloseAudioDevice(dev_);
-		dev_ = 0;
-	}
-	if (tex_) {
-		SDL_DestroyTexture(tex_);
-		tex_ = nullptr;
-	}
-	tex_w_ = tex_h_ = 0;
+	pcm_.close();
 	frames_.clear();
+	current_ = Frame();
 	pool_.clear();
 	state_ = State::Idle;
 }
@@ -410,14 +407,7 @@ void Player::demux_run() {
 	}
 
 	if (as >= 0) {
-		SDL_AudioSpec want, have;
-		SDL_zero(want);
-		want.freq = kOutRate;
-		want.format = AUDIO_S16SYS;
-		want.channels = 2;
-		want.samples = 1024;
-		dev_ = SDL_OpenAudioDevice(nullptr, 0, &want, &have, 0);
-		if (!dev_) dlog("player: SDL_OpenAudioDevice: %s", SDL_GetError());
+		if (!pcm_.open()) dlog("player: can't open the audio output");
 	}
 
 	dlog("player: %s, %.0fs, video #%d %s, audio #%d %s", fmt_->iformat->name, duration_, vs,
@@ -441,7 +431,7 @@ void Player::demux_run() {
 	apply_run_state();
 
 	if (vs >= 0) video_ = std::thread([this] { video_thread(); });
-	if (as >= 0 && dev_) audio_ = std::thread([this] { audio_thread(); });
+	if (as >= 0 && pcm_.is_open()) audio_ = std::thread([this] { audio_thread(); });
 
 	AVPacket* pkt = av_packet_alloc();
 	int errors = 0;
@@ -473,7 +463,7 @@ void Player::demux_run() {
 		if (vq_.bytes() + aq_.bytes() > kMaxQueueBytes ||
 		    ((vs < 0 || vq_.duration() > 60) && (audio_stream_ < 0 || aq_.duration() > 60)) || eof_) {
 			// Full, or at the end: wait for the decoders (or a seek).
-			SDL_Delay(10);
+			delay_ms(10);
 			continue;
 		}
 
@@ -491,7 +481,7 @@ void Player::demux_run() {
 			}
 			bool at_end = r == AVERROR_EOF || (fmt_->pb && avio_feof(fmt_->pb));
 			if (!at_end && ++errors < 60) {
-				SDL_Delay(100);
+				delay_ms(100);
 				continue;
 			}
 			if (!at_end) dlog("player: read error %s, treating as end", av_err(r).c_str());
@@ -564,7 +554,7 @@ void Player::do_seek(double target) {
 		audio_end_pts_ = -1;
 		wall_base_pts_ = target;
 		wall_base_time_ = now_seconds();
-		if (dev_) SDL_ClearQueuedAudio(dev_);
+		pcm_.clear();
 	}
 	buffering_ = true;
 	buffer_percent_ = 0;
@@ -641,7 +631,7 @@ void Player::video_thread() {
 		}
 		if (r == -1) {
 			if (sent_eof) {
-				SDL_Delay(10);
+				delay_ms(10);
 				if (vq_.serial() != serial) {
 					avcodec_flush_buffers(vctx_);
 					serial = vq_.serial();
@@ -684,7 +674,7 @@ void Player::video_thread() {
 					if (frame->linesize[1] == frame->linesize[2] && fast_convert(yp, f)) return;
 				}
 				sws_ = sws_getCachedContext(sws_, frame->width, frame->height, AVPixelFormat(frame->format), f.w, f.h,
-				                            AV_PIX_FMT_BGRA,
+				                            AV_PIX_FMT_RGBA,
 				                            (f.w == frame->width && f.h == frame->height) ? SWS_POINT : SWS_BILINEAR,
 				                            nullptr, nullptr, nullptr);
 				if (!sws_) return;
@@ -817,7 +807,7 @@ private:
 
 }  // namespace
 
-// A picture to the BGRA frame with the right colours (yuv_convert.h), at the
+// A picture to the RGBA frame with the right colours (yuv_convert.h), at the
 // same size or exactly half (4K to the 1080p screen), on four threads.
 // False for other sizes (the caller uses swscale).
 bool Player::fast_convert(const YuvPicture& pic, Frame& f) {
@@ -828,12 +818,12 @@ bool Player::fast_convert(const YuvPicture& pic, Frame& f) {
 	if (!scale) return false;
 	YuvColors colors = colors_;
 	RowPool::get().run(
-	    f.h, [&](int a, int b) { yuv_to_bgra(pic, colors, scale, f.pixels.data(), f.w, a, b); });
+	    f.h, [&](int a, int b) { yuv_to_rgba(pic, colors, scale, f.pixels.data(), f.w, a, b); });
 	return true;
 }
 
 // A hardware picture: two planes (Y, then interleaved UV), 8 or 16-bit samples.
-void Player::hw_to_bgra(const HwDecoder::Picture& pic, Frame& f) {
+void Player::hw_to_rgba(const HwDecoder::Picture& pic, Frame& f) {
 	if (pic.ten_bit && hw_shift_ < 0) {
 		// 10-bit samples sit either in the low or the high bits of each
 		// 16-bit word; look at a few to tell.
@@ -857,7 +847,7 @@ void Player::hw_to_bgra(const HwDecoder::Picture& pic, Frame& f) {
 	if (fast_convert(yp, f)) return;
 	// Other sizes: swscale from NV12 / P010.
 	AVPixelFormat fmt = pic.ten_bit ? AV_PIX_FMT_P010LE : AV_PIX_FMT_NV12;
-	hw_sws_ = sws_getCachedContext(hw_sws_, pic.width, pic.height, fmt, f.w, f.h, AV_PIX_FMT_BGRA, SWS_BILINEAR,
+	hw_sws_ = sws_getCachedContext(hw_sws_, pic.width, pic.height, fmt, f.w, f.h, AV_PIX_FMT_RGBA, SWS_BILINEAR,
 	                               nullptr, nullptr, nullptr);
 	if (!hw_sws_) return;
 	const uint8_t* src[4] = {pic.y, pic.uv, nullptr, nullptr};
@@ -890,7 +880,7 @@ bool Player::video_thread_hw() {
 			if (rr == 0) return true;
 			decoded_++;
 			double pts = pic.pts_us == INT64_MIN ? -1 : double(pic.pts_us) / 1e6;
-			if (!emit_frame(pts, serial, [&](Frame& f) { hw_to_bgra(pic, f); }, pic.width, pic.height, sar))
+			if (!emit_frame(pts, serial, [&](Frame& f) { hw_to_rgba(pic, f); }, pic.width, pic.height, sar))
 				return false;
 		}
 	};
@@ -908,7 +898,7 @@ bool Player::video_thread_hw() {
 		}
 		if (r == -1) {
 			if (sent_eof) {
-				SDL_Delay(10);
+				delay_ms(10);
 				if (vq_.serial() != serial) {
 					hw_->flush();
 					serial = vq_.serial();
@@ -956,8 +946,8 @@ bool Player::video_thread_hw() {
 // Audio
 
 double Player::queued_audio_seconds() const {
-	if (!dev_) return 0;
-	return double(SDL_GetQueuedAudioSize(dev_)) / kOutBytesPerSec;
+	if (!pcm_.is_open()) return 0;
+	return double(pcm_.queued_bytes()) / kOutBytesPerSec;
 }
 
 void Player::audio_thread() {
@@ -990,7 +980,7 @@ void Player::audio_thread() {
 		if (r == -1) {
 			if (sent_eof) {
 				alock.unlock();
-				SDL_Delay(10);
+				delay_ms(10);
 				continue;
 			}
 			avcodec_send_packet(actx_, nullptr);
@@ -1051,15 +1041,15 @@ void Player::audio_thread() {
 			av_frame_unref(frame);
 			if (n <= 0) continue;
 
-			// Keep SDL's queue short so the clock (and seeking) stay responsive.
+			// Keep the output queue short so the clock (and seeking) stay responsive.
 			alock.unlock();
-			while (!abort_ && aq_.serial() == serial && queued_audio_seconds() > kMaxQueuedAudio) SDL_Delay(5);
+			while (!abort_ && aq_.serial() == serial && queued_audio_seconds() > kMaxQueuedAudio) delay_ms(5);
 			alock.lock();
 			if (abort_ || aq_.serial() != serial || !actx_) break;
 
 			std::lock_guard<std::mutex> lock(clock_m_);
 			if (aq_.serial() != serial) break;
-			SDL_QueueAudio(dev_, out.data(), Uint32(n * 4));
+			pcm_.queue(out.data(), size_t(n) * 4);
 			double end = (pts >= 0 ? pts : std::max(0.0, audio_end_pts_)) + double(n) / kOutRate;
 			if (pts < 0 && audio_end_pts_ >= 0) end = audio_end_pts_ + double(n) / kOutRate;
 			audio_end_pts_ = end;
@@ -1074,7 +1064,7 @@ void Player::audio_thread() {
 // Clock, buffering, presentation
 
 double Player::clock_locked() {
-	if (audio_stream_ >= 0 && dev_) {
+	if (audio_stream_ >= 0 && pcm_.is_open()) {
 		if (audio_end_pts_ < 0) return wall_base_pts_;
 		double latency = 1024.0 / kOutRate;
 		return std::max(0.0, audio_end_pts_ - queued_audio_seconds() - latency);
@@ -1096,7 +1086,7 @@ void Player::set_clock_running(bool running) {
 
 void Player::apply_run_state() {
 	bool run = !paused_ && !buffering_ && state_ == State::Playing;
-	if (dev_) SDL_PauseAudioDevice(dev_, run ? 0 : 1);
+	pcm_.pause(!run);
 	set_clock_running(run);
 }
 
@@ -1112,7 +1102,7 @@ bool Player::buffering(int* percent) const {
 
 void Player::update_buffering() {
 	if (state_ != State::Playing) return;
-	bool has_v = video_stream_ >= 0, has_a = audio_stream_ >= 0 && dev_;
+	bool has_v = video_stream_ >= 0, has_a = audio_stream_ >= 0 && pcm_.is_open();
 	if (buffering_) {
 		double target = std::max(kBufferTargets[stalls_], start_target_);
 		double vbuf = has_v ? vq_.duration() : 1e9, abuf = has_a ? aq_.duration() : 1e9;
@@ -1180,7 +1170,8 @@ void Player::seek(double t) {
 	if (state_ == State::Ended) state_ = State::Playing;
 }
 
-void Player::present(SDL_Renderer* renderer) {
+const Player::Picture* Player::present() {
+	const Picture* out = nullptr;
 	if (state_ == State::Playing) update_buffering();
 	if (state_ == State::Playing || state_ == State::Ended) {
 		double clk;
@@ -1202,13 +1193,6 @@ void Player::present(SDL_Renderer* renderer) {
 		if (pick < 0 && !have_picture_ && !frames_.empty()) pick = 0;
 		if (pick >= 0) {
 			Frame& f = frames_[pick];
-			if (!tex_ || tex_w_ != f.w || tex_h_ != f.h) {
-				if (tex_) SDL_DestroyTexture(tex_);
-				tex_ = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, f.w, f.h);
-				tex_w_ = f.w;
-				tex_h_ = f.h;
-			}
-			if (tex_) SDL_UpdateTexture(tex_, nullptr, f.pixels.data(), f.w * 4);
 			have_picture_ = true;
 			shown_++;
 			// No audio: the first picture after a seek starts the clock.
@@ -1219,17 +1203,24 @@ void Player::present(SDL_Renderer* renderer) {
 			dropped_ += pick;
 			heavy_window_dropped_ += pick;
 			heavy_window_decoded_ += pick + 1;
+			// The picked frame is the one on show now; the buffer it replaces goes
+			// back to the pool with the frames that were skipped.
+			std::swap(current_, f);
 			for (int i = 0; i <= pick; i++) {
 				pool_.push_back(std::move(frames_.front()));
 				frames_.pop_front();
 			}
+			pic_.rgba = current_.pixels.data();
+			pic_.w = current_.w;
+			pic_.h = current_.h;
+			out = &pic_;
 			fq_cv_.notify_all();
 		}
 
 		// Ended?
 		if (state_ == State::Playing && eof_ && vq_.count() == 0 && aq_.count() == 0 &&
 		    (video_stream_ < 0 || (video_drained_ && frames_.empty())) &&
-		    (audio_stream_ < 0 || !dev_ || (audio_drained_ && queued_audio_seconds() < 0.02)))
+		    (audio_stream_ < 0 || !pcm_.is_open() || (audio_drained_ && queued_audio_seconds() < 0.02)))
 			state_ = State::Ended;
 	}
 
@@ -1240,13 +1231,8 @@ void Player::present(SDL_Renderer* renderer) {
 		heavy_window_start_ = now;
 		heavy_window_dropped_ = heavy_window_decoded_ = 0;
 	}
-
-	if (tex_ && have_picture_) {
-		SDL_Rect dst = {(kScreenW - tex_w_) / 2, (kScreenH - tex_h_) / 2, tex_w_, tex_h_};
-		SDL_RenderCopy(renderer, tex_, nullptr, &dst);
-	}
+	return out;
 }
-
 // ---------------------------------------------------------------------------
 // Tracks and stats
 

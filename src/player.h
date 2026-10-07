@@ -1,6 +1,6 @@
 #pragma once
 
-#include <SDL.h>
+#include "pcm_out.h"
 
 #include <atomic>
 #include <condition_variable>
@@ -28,8 +28,9 @@ struct SwrContext;
 // Plays one URL with FFmpeg; video on the PS5's hardware decoder when it
 // takes the stream (hwdec_ps5.h), else FFmpeg's software decoder. Threads:
 // demux, video decode (+ scale to screen size), audio decode (+ resample
-// into SDL's queue). The audio queue is the master clock; without audio, the wall clock.
-// The UI thread calls present() every frame.
+// into the audio output's queue). The audio queue is the master clock; without
+// audio, the wall clock. The UI thread calls present() every frame and shows
+// the picture it returns.
 class Player {
 public:
 	struct Track {
@@ -71,8 +72,15 @@ public:
 	std::vector<Track> subtitle_tracks() const;
 	std::string embedded_subtitle(int stream, double t);
 
-	// UI thread: picks the frame due now, uploads and draws it.
-	void present(SDL_Renderer* renderer);
+	// A picture to show: tightly packed RGBA at its display size, valid until the
+	// next present().
+	struct Picture {
+		const uint8_t* rgba = nullptr;
+		int w = 0, h = 0;
+	};
+	// UI thread, every frame: picks the frame due now. Returns it when it is a new
+	// one, nullptr when the one already shown is still the right one.
+	const Picture* present();
 
 	std::string stats();
 	std::string codec_summary() const;
@@ -109,7 +117,7 @@ private:
 		bool eof_ = false, abort_ = false;
 	};
 	struct Frame {
-		std::vector<uint8_t> pixels;  // BGRA
+		std::vector<uint8_t> pixels;  // RGBA
 		int w = 0, h = 0;
 		double pts = 0;
 		int serial = 0;
@@ -122,7 +130,7 @@ private:
 	bool video_thread_hw();  // false: the hardware decoder gave up, carry on in software
 	bool emit_frame(double pts, int serial, const std::function<void(Frame&)>& fill, int src_w, int src_h,
 	                double sar);
-	void hw_to_bgra(const HwDecoder::Picture& pic, Frame& f);
+	void hw_to_rgba(const HwDecoder::Picture& pic, Frame& f);
 	bool fast_convert(const YuvPicture& pic, Frame& f);
 	YuvColors colors_ = YuvColors::Bt709;  // of the video being played
 	void audio_thread();
@@ -180,16 +188,16 @@ private:
 	std::deque<Frame> frames_;
 	std::vector<Frame> pool_;
 	std::atomic<bool> video_drained_{false};
-	SDL_Texture* tex_ = nullptr;
-	int tex_w_ = 0, tex_h_ = 0;
+	Frame current_;  // the picture on show
+	Picture pic_;
 	bool have_picture_ = false;
 	SwsContext* sws_ = nullptr;
 
 	// Audio
-	SDL_AudioDeviceID dev_ = 0;
+	PcmOut pcm_;
 	SwrContext* swr_ = nullptr;
 	std::mutex clock_m_;
-	double audio_end_pts_ = -1;  // pts at the end of what's queued in SDL
+	double audio_end_pts_ = -1;  // pts at the end of what's queued for output
 	std::atomic<bool> audio_drained_{false};
 
 	// Wall clock (no audio)

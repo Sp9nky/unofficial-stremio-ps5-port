@@ -10,7 +10,7 @@
 
 // A small pool of worker threads for blocking work (HTTP, disk), and a
 // queue of callbacks the UI thread drains once per frame. Only the UI thread
-// may touch the app state and the RmlUi data model.
+// may touch the app state.
 class Tasks {
 public:
 	void start(int workers);

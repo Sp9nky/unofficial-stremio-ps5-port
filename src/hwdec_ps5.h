@@ -27,7 +27,7 @@ public:
 		int64_t pts_us = INT64_MIN;
 	};
 
-	// Loads the decoder module; call once at start-up (before SDL).
+	// Loads the decoder module; call once at start-up (before the first frame is drawn).
 	static void load_module();
 
 	// A decoder for this stream, or nullptr (why says so) when the hardware

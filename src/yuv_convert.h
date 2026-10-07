@@ -1,4 +1,4 @@
-// YUV 4:2:0 pictures to the BGRA frames the player shows, at the same size
+// YUV 4:2:0 pictures to the RGBA frames the player shows, at the same size
 // or exactly half (4K to the 1080p screen), with the right colours:
 //
 //   SDR: studio-range YUV with the BT.601 (SD) or BT.709 (HD) matrix;
@@ -26,8 +26,8 @@ struct YuvPicture {
 
 enum class YuvColors { Bt601, Bt709, Hdr10 };
 
-// Rows [row_begin, row_end) of the out_w x out_h BGRA output; out_w/out_h is
+// Rows [row_begin, row_end) of the out_w x out_h RGBA output; out_w/out_h is
 // the picture's size (scale 1) or half of it (scale 2). Safe to call from
 // several threads on different rows.
-void yuv_to_bgra(const YuvPicture& pic, YuvColors colors, int scale, uint8_t* out, int out_w, int row_begin,
+void yuv_to_rgba(const YuvPicture& pic, YuvColors colors, int scale, uint8_t* out, int out_w, int row_begin,
                  int row_end);

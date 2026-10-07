@@ -8,11 +8,6 @@
 
 using json = nlohmann::json;
 
-// Size of the UI: the stylesheets use dp, and this is the RmlUi context's
-// dp-to-pixel ratio (main.cpp). Code that mirrors layout sizes (scroll
-// pitches, artwork sizes) multiplies by it too.
-constexpr float kUiScale = 0.9f;
-
 // Logging goes to stdout and to <data dir>/log.txt (opened by log_open).
 void log_open(const std::string& path);
 void dlog(const char* fmt, ...) __attribute__((format(printf, 1, 2)));

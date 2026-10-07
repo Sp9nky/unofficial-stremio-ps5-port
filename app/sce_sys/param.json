@@ -2,16 +2,32 @@
   "ageLevel": {
     "default": 0
   },
-  "applicationCategoryType": 65536,
+  "amm": {
+    "multimapVaRangeInGib": 512,
+    "pagetableMemorySizeInMib": 256,
+    "vaRangeInGib": 512
+  },
+  "applicationCategoryType": 0,
   "applicationDrmType": "free",
   "attribute": 0,
   "attribute2": 0,
-  "attribute3": 0,
+  "attribute3": 524352,
   "conceptId": "77711",
-  "contentBadgeType": 2,
+  "contentBadgeType": 1,
   "contentId": "UP9000-PPSA77711_00-STREMIOPS5000001",
   "contentVersion": "01.000.000",
-  "downloadDataSize": 256,
+  "downloadDataSize": 16384,
+  "gameIntent": {
+    "permittedIntents": [
+      {
+        "intentType": "launchActivity"
+      }
+    ]
+  },
+  "kernel": {
+    "cpuPageTableSize": 268435456,
+    "gpuPageTableSize": 268435456
+  },
   "localizedParameters": {
     "defaultLanguage": "en-US",
     "en-US": {
@@ -20,7 +36,7 @@
   },
   "masterVersion": "01.00",
   "pubtools": {
-    "creationDate": "2026-10-04 00:00:00",
+    "creationDate": "2026-10-07 00:00:00",
     "loudnessSnd0": "-28.00",
     "toolVersion": "2.00"
   },
