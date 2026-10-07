@@ -246,7 +246,9 @@ developers; thank you to all of them:
 
 - **BlackBearReloaded**: [ps5-homebrew-ui](https://github.com/blackbearreloaded/ps5-homebrew-ui),
   the OpenGL interface toolkit this version is built on (renderer, controller
-  input, text and shapes, sound mixer and the interface sounds, runtime shims; vendored in `third_party/hui`);
+  input, text and shapes, runtime shims; vendored in `third_party/hui`), and its
+  sound mixer and the *Glass* interface sounds (from ProsperoEden, generated with
+  ElevenLabs Sound Effects);
   [ps5-opengl](https://github.com/blackbearreloaded/ps5-opengl), which makes
   OpenGL 4.6 run on the PS5, together with [Mesa](https://mesa3d.org/) and
   OpenGNM PSBC; and
@@ -271,15 +273,24 @@ developers; thank you to all of them:
   shapes the toolkit draws.
 - Fonts: [Inter](https://github.com/rsms/inter) (The Inter Project Authors),
   [Montserrat](https://github.com/JulietaUla/Montserrat) (The Montserrat Project
-  Authors) and [DejaVu](https://dejavu-fonts.github.io/) for the interface;
-  Noto Sans, Noto Emoji and Noto Naskh Arabic UI (Google) for other scripts.
-- [MkPFS](https://github.com/PSBrew/MkPFS) (PSBrew) for packaging, and
+  Authors) and [DejaVu](https://dejavu-fonts.github.io/) for the interface (the
+  toolkit also ships Press Start 2P and Patrick Hand); Noto Sans, Noto Emoji and
+  Noto Naskh Arabic UI (Google) for other scripts.
+- Build tools: [MkPFS](https://github.com/PSBrew/MkPFS) (PSBrew) for packaging,
   Microsoft's [DirectXTex](https://github.com/microsoft/DirectXTex) for the
-  console's start-up pictures.
+  console's start-up pictures, [librsvg](https://gitlab.gnome.org/GNOME/librsvg)
+  for the icons and [Pillow](https://python-pillow.org/) for the pictures and
+  the screen previews.
+- On the console, the app relies on
+  [ShadowMountPlus](https://github.com/drakmor/ShadowMountPlus) (drakmor),
+  [etaHEN](https://github.com/etaHEN/etaHEN) and
+  [kstuff](https://github.com/EchoStretch/kstuff); none of them is included.
 - [Stremio](https://github.com/Stremio): [stremio-icons](https://github.com/Stremio/stremio-icons)
   and [stremio-video](https://github.com/Stremio/stremio-video), and the logo
   from [dashboard-icons](https://github.com/homarr-labs/dashboard-icons)
-  (homarr-labs).
+  (homarr-labs). The app uses Stremio's public services for your account.
+- Posters, wallpapers and descriptions come from the addons you use (for example
+  Cinemeta and its image service) and belong to their owners.
 
 See [THIRD_PARTY.md](THIRD_PARTY.md) for every component, where it is used and
 its license.

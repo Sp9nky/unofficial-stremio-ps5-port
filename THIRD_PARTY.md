@@ -88,7 +88,9 @@ of the OpenGL SDK, so they ship inside the `.ffpfsc`.
 
 The app talks to Stremio's public services (`api.strem.io` for the account,
 library and addon collection, `link.stremio.com` for sign-in) and to the addons
-the user installed. Streams play directly on the console (the built-in
+the user installed. Posters, wallpapers and descriptions come from those addons
+(for example Cinemeta and its image service, `images.metahub.space`) and belong to
+their owners. Streams play directly on the console (the built-in
 torrent engine, or the stream's own link); a Stremio streaming server
 ([Stremio/server-docker](https://github.com/Stremio/server-docker), GPL-2.0)
 is optional. On the console it relies on
