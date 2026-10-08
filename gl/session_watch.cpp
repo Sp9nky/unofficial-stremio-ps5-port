@@ -728,13 +728,9 @@ bool Session::hdr_wanted() const
     return prefs_.hdr_output; // HDR is tried at start and kept while it is on: the whole app goes through the HDR pass
 }
 
-void Session::hdr_status_changed(const std::string &text)
+void Session::hdr_status_changed(const std::string &)
 {
-    refresh_settings();
-    if (text == "Starting" || text == "Off")
-        return;
-    const bool problem = text.rfind("On:", 0) != 0 && text.rfind("Switching", 0) != 0;
-    say("HDR: " + text, 8.0, problem);
+    refresh_settings(); // the line in Settings shows it; no pop-up
 }
 
 void Session::set_hdr_scanout(bool on)

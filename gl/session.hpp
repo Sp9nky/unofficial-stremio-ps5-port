@@ -136,7 +136,7 @@ class Session
     // main loop telling back whether the screen really is in HDR.
     bool hdr_wanted() const;
     void set_hdr_scanout(bool on);
-    void hdr_status_changed(const std::string &text); // the HDR output's state changed: say it, and show it in Settings
+    void hdr_status_changed(const std::string &text); // the HDR output's state changed: Settings shows it (no pop-up)
     bool typing() const
     {
         return ime_.active();
