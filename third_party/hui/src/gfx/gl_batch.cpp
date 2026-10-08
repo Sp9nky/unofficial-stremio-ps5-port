@@ -39,17 +39,17 @@ const vec2 kCorners[6] = vec2[6](vec2(0.0, 0.0), vec2(1.0, 0.0), vec2(0.0, 1.0),
 void main()
 {
     vec2 corner = kCorners[gl_VertexID];
-    int shape = int(a_params.w + 0.5);
+    float shape = floor(a_params.w + 0.5);
     vec2 size = a_rect.zw;
     // Grow shapes by their softness plus one output pixel for anti-aliasing;
     // glyph and image quads map texels exactly and are not grown.
-    float pad = (shape == 1 || shape == 3) ? 0.0 : a_params.z + 1.0 / u_viewport.x;
+    float pad = (shape == 1.0 || shape == 3.0) ? 0.0 : a_params.z + 1.0 / u_viewport.x;
     vec2 local = mix(vec2(-pad), size + vec2(pad), corner);
     vec2 centred = local - 0.5 * size;
     vec2 virt = a_rect.xy + local;
     // Rounded rectangles, shadows and triangles may turn about their centre: the quad
     // rotates, the distance field keeps working in the unrotated frame.
-    bool box = shape == 0 || shape == 2 || shape == 5;
+    bool box = shape == 0.0 || shape == 2.0 || shape == 5.0;
     if (box && a_extra.x != 0.0)
     {
         float c = cos(a_extra.x);
@@ -60,7 +60,7 @@ void main()
     v_virtual = virt;
     v_local = centred;
     v_half = 0.5 * size;
-    v_t = (shape == 0 && a_extra.y > 0.5) ? clamp(local.x / max(size.x, 1e-3), 0.0, 1.0)
+    v_t = (shape == 0.0 && a_extra.y > 0.5) ? clamp(local.x / max(size.x, 1e-3), 0.0, 1.0)
                                           : clamp(local.y / max(size.y, 1e-3), 0.0, 1.0);
     v_uv = mix(a_extra.xy, a_extra.zw, corner);
     v_top = a_top;
@@ -127,10 +127,10 @@ float star5(vec2 p, float r, float rf)
 void main()
 {
     float px = 1.0 / u_viewport.x; // virtual units per output pixel
-    int shape = int(v_params.w + 0.5);
+    float shape = floor(v_params.w + 0.5);
     vec4 fill = mix(v_top, v_bottom, v_t);
     vec4 color;
-    if (shape == 0)
+    if (shape == 0.0)
     {
         float radius = min(v_params.x, min(v_half.x, v_half.y));
         float d = round_box(v_local, v_half, radius);
@@ -142,35 +142,35 @@ void main()
         }
         color.a *= clamp(0.5 - d / px, 0.0, 1.0);
     }
-    else if (shape == 1)
+    else if (shape == 1.0)
     {
         // The font atlases stay bound to their own units; the slot picks one.
-        int slot = int(v_params.z + 0.5);
+        float slot = floor(v_params.z + 0.5);
         float sdf;
-        if (slot == 1)
+        if (slot == 1.0)
             sdf = texture(u_fonts[0], v_uv).r;
-        else if (slot == 2)
+        else if (slot == 2.0)
             sdf = texture(u_fonts[1], v_uv).r;
-        else if (slot == 3)
+        else if (slot == 3.0)
             sdf = texture(u_fonts[2], v_uv).r;
-        else if (slot == 4)
+        else if (slot == 4.0)
             sdf = texture(u_fonts[3], v_uv).r;
-        else if (slot == 5)
+        else if (slot == 5.0)
             sdf = texture(u_fonts[4], v_uv).r;
-        else if (slot == 6)
+        else if (slot == 6.0)
             sdf = texture(u_fonts[5], v_uv).r;
         else
             sdf = texture(u_texture, v_uv).r;
         float distance = (sdf - 0.5) * 2.0 * v_params.x;
         color = vec4(fill.rgb, fill.a * clamp(distance / px + 0.5, 0.0, 1.0));
     }
-    else if (shape == 2)
+    else if (shape == 2.0)
     {
         float radius = min(v_params.x, min(v_half.x, v_half.y));
         float d = round_box(v_local, v_half, radius);
         color = vec4(fill.rgb, fill.a * (1.0 - smoothstep(-v_params.z, v_params.z, d)));
     }
-    else if (shape == 3)
+    else if (shape == 3.0)
     {
         color = texture(u_texture, v_uv) * fill;
         if (v_params.x > 0.0)
@@ -179,7 +179,7 @@ void main()
             color.a *= clamp(0.5 - round_box(v_local, v_half, radius) / px, 0.0, 1.0);
         }
     }
-    else if (shape == 4)
+    else if (shape == 4.0)
     {
         vec2 pa = v_virtual - v_extra.xy;
         vec2 ba = v_extra.zw - v_extra.xy;
@@ -187,7 +187,7 @@ void main()
         float d = length(pa - ba * h) - 0.5 * v_params.y;
         color = vec4(fill.rgb, fill.a * clamp(0.5 - d / px, 0.0, 1.0));
     }
-    else if (shape == 8)
+    else if (shape == 8.0)
     {
         // Box with 45 degree corner cuts: the box distance, limited by the
         // diagonal plane through each corner.
@@ -203,7 +203,7 @@ void main()
         }
         color.a *= clamp(0.5 - d / px, 0.0, 1.0);
     }
-    else if (shape == 7)
+    else if (shape == 7.0)
     {
         // Ring sector, after Inigo Quilez's arc: turn the sector upright,
         // fold it on its axis, then measure to the ring or to its end.
@@ -224,7 +224,7 @@ void main()
             d = ((sc.y * p.x > sc.x * p.y) ? length(p - sc * ra) : ring) - rb;
         color = vec4(fill.rgb, fill.a * clamp(0.5 - d / px, 0.0, 1.0));
     }
-    else if (shape == 6)
+    else if (shape == 6.0)
     {
         vec2 p = vec2(v_local.x, -v_local.y);
         float d = star5(p, min(v_half.x, v_half.y), 0.45);

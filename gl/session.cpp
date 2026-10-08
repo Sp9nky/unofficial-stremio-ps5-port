@@ -6,6 +6,7 @@
 
 #include "http.h"
 #include "netstream.h"
+#include "version.hpp"
 #include "torrent/engine.h"
 
 #include <algorithm>
@@ -23,6 +24,7 @@ constexpr std::size_t kTextureBudget = 640u << 20; // bytes of artwork kept on t
 enum SettingIndex
 {
     kAccount,
+    kProfile,
     kTorrents,
     kServer,
     kSubLangs,
@@ -32,6 +34,7 @@ enum SettingIndex
     kAutoplay,
     kUiSounds,
     kAddAddon,
+    kUpdates,
     kReload,
     kExit,
     kSettingCount
@@ -103,6 +106,7 @@ bool Session::init(const std::string &base_dir, const std::string &data_dir, hui
     bt::Engine::get().configure(data_dir_, 6ll << 30);
     NetStream::set_cache_dir(data_dir_);
 
+    load_profiles();
     load_prefs();
     load_progress();
     clock = format_clock();
@@ -133,7 +137,7 @@ void Session::shutdown()
 void Session::load_prefs()
 {
     json j;
-    if (load_json(data_dir_ + "/settings.json", j))
+    if (load_json(profile_file("settings.json"), j))
     {
         prefs_.server_url = jstr(j, "server_url");
         prefs_.builtin_torrents = jbool(j, "builtin_torrents", prefs_.builtin_torrents);
@@ -153,28 +157,33 @@ void Session::load_prefs()
     }
 }
 
-void Session::save_prefs()
+json Session::prefs_json(const Prefs &p)
 {
     json j;
-    j["server_url"] = prefs_.server_url;
-    j["builtin_torrents"] = prefs_.builtin_torrents;
-    j["subtitle_languages"] = prefs_.subtitle_langs;
-    j["auto_subtitles"] = prefs_.auto_subtitles;
-    j["subtitle_size"] = prefs_.sub_size;
-    j["audio_languages"] = prefs_.audio_langs;
-    j["autoplay_next"] = prefs_.autoplay_next;
-    j["ui_sounds"] = prefs_.ui_sounds;
-    j["extra_addons"] = prefs_.extra_addons;
-    j["auth_key"] = prefs_.auth_key;
-    j["user_email"] = prefs_.user_email;
-    if (!save_json(data_dir_ + "/settings.json", j))
+    j["server_url"] = p.server_url;
+    j["builtin_torrents"] = p.builtin_torrents;
+    j["subtitle_languages"] = p.subtitle_langs;
+    j["auto_subtitles"] = p.auto_subtitles;
+    j["subtitle_size"] = p.sub_size;
+    j["audio_languages"] = p.audio_langs;
+    j["autoplay_next"] = p.autoplay_next;
+    j["ui_sounds"] = p.ui_sounds;
+    j["extra_addons"] = p.extra_addons;
+    j["auth_key"] = p.auth_key;
+    j["user_email"] = p.user_email;
+    return j;
+}
+
+void Session::save_prefs()
+{
+    if (!save_json(profile_file("settings.json"), prefs_json(prefs_)))
         say("Could not save settings to " + data_dir_, 5.0, true);
 }
 
 void Session::load_progress()
 {
     json j;
-    if (!load_json(data_dir_ + "/progress.json", j))
+    if (!load_json(profile_file("progress.json"), j))
         return;
     const json &items = jobj(j, "items");
     if (items.is_object())
@@ -212,7 +221,7 @@ void Session::save_progress()
                                {"stream_video", kv.second.stream_video_id}, {"up_next", kv.second.up_next}};
     j["items"] = items;
     j["watched"] = json(std::vector<std::string>(watched_.begin(), watched_.end()));
-    save_json(data_dir_ + "/progress.json", j);
+    save_json(profile_file("progress.json"), j);
 }
 
 // ---------------------------------------------------------------------------
@@ -425,6 +434,8 @@ void Session::refresh_settings()
     set(kAccount, Kind::value, "Stremio account", signed_in() ? prefs_.user_email : "Not signed in",
         signed_in() ? (confirm_sign_out_ ? "Press Cross again to sign out." : "Press Cross to sign out.")
                     : "Sign in to sync your addons, library and Continue Watching. Press Cross.");
+    set(kProfile, Kind::value, "Change profile", profile_name(active_),
+        "Choose who is watching, or add a profile. Each profile has its own Stremio account, library, Continue Watching and addons. Press Cross.");
     set(kTorrents, Kind::value, "Play torrents with", prefs_.builtin_torrents ? "This app" : "Streaming server",
         prefs_.builtin_torrents ? "The app downloads torrents itself; no server needed. Press Cross to use your server."
                                 : "Your Stremio streaming server downloads torrents. Press Cross to use the app's own.");
@@ -443,6 +454,8 @@ void Session::refresh_settings()
     set(kAddAddon, Kind::value, "Add addon by URL", "",
         prefs_.extra_addons.empty() ? "An addon's manifest URL. Remove added addons from the Addons page."
                                     : std::to_string(prefs_.extra_addons.size()) + " added here.");
+    set(kUpdates, Kind::value, "Check for updates", std::string("Version ") + kAppVersion,
+        "Look for a newer version on GitHub. If there is one you can install it from here; the app closes while it updates. Press Cross.");
     set(kReload, Kind::action, "Reload addons and catalogs", "", "Fetch every addon and catalog again.");
     set(kExit, Kind::action, "Exit Stremio", "", "Close the app and go back to the home screen.");
     changed_ |= kSettings;
@@ -464,6 +477,9 @@ void Session::settings_activate(int row)
             confirm_sign_out_ = false;
             sign_out();
         }
+        break;
+    case kProfile:
+        profile_picker_req_ = true;
         break;
     case kTorrents:
         prefs_.builtin_torrents = !prefs_.builtin_torrents;
@@ -559,6 +575,9 @@ void Session::settings_activate(int row)
         prefs_.ui_sounds = !prefs_.ui_sounds;
         save_prefs();
         cue(hui::audio::Cue::toggle);
+        break;
+    case kUpdates:
+        update_check(true);
         break;
     case kReload:
         addons_reload();
@@ -751,6 +770,12 @@ void Session::update(float dt, const Cursor &cursor)
     }
     if (sign_in_open)
         login_poll();
+    if (boot_done_ && !update_checked_)
+    {
+        update_checked_ = true;
+        update_check(false); // once per start, silent unless a version is waiting
+    }
+    update_poll();
     poll_typing();
     if (watching)
     {

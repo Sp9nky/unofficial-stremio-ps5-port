@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -20,6 +21,11 @@ HttpResponse http_get(const std::string& url, long timeout_s = 20, const std::at
                       const std::vector<std::string>& headers = {});
 HttpResponse http_post_json(const std::string& url, const std::string& body, long timeout_s = 20,
                             const std::atomic<bool>* cancel = nullptr);
+
+// A large download, handed on piece by piece: `sink` returns false to stop (the request then ends with the
+// error "stopped"). The response has no body; a 200 status and no error mean it all arrived.
+HttpResponse http_download(const std::string& url, const std::function<bool(const char*, size_t)>& sink,
+                           const std::atomic<bool>* cancel = nullptr, const std::vector<std::string>& headers = {});
 
 const std::string& http_ca_bundle();
 // What every curl handle needs on this platform (a CURL*). In the native PS5

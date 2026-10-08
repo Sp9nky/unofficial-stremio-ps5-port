@@ -17,6 +17,8 @@
 #include "gfx/renderer.hpp"
 #include "library.hpp"
 #include "overlays.hpp"
+#include "profiles.hpp"
+#include "update.hpp"
 #include "page.hpp"
 #include "player.hpp"
 #include "sample.hpp"
@@ -1011,6 +1013,105 @@ int main(int argc, char **argv)
             sx::draw_toast(list, env, toast, 1.0f);
             rig.shot("overlay-5-toast-info", backdrop, list);
         }
+    }
+
+    if (wants("profiles"))
+    {
+        sx::ProfilesState st;
+        st.items = {{"Alex", "alex@example.com", 0x7b5bf5}, {"Maria", "maria@example.com", 0xc0475c},
+                    {"Kids", "kids@example.com", 0x1fa37a}, {"Nikos", "", 0xe0803a}};
+        const auto picker = [&](float focus, bool leave, const char *name) {
+            hui::gfx::DrawList list;
+            hui::gfx::BackdropSpec backdrop;
+            sx::apply_page_backdrop(backdrop, 0.0f);
+            st.focus = focus;
+            st.can_leave = leave;
+            sx::draw_profile_picker(list, env, st, 1.0f);
+            rig.shot(name, backdrop, list);
+        };
+        picker(0.0f, false, "profiles-1-first");
+        picker(1.0f, false, "profiles-2-second");
+        picker(1.45f, false, "profiles-3-gliding");
+        picker(3.0f, true, "profiles-4-last-not-signed-in");
+        picker(4.0f, true, "profiles-5-add");
+        const auto editor = [&](int index, bool is_new, int row, const char *name) {
+            hui::gfx::DrawList list;
+            hui::gfx::BackdropSpec backdrop;
+            sx::apply_page_backdrop(backdrop, 0.0f);
+            st.focus = static_cast<float>(index < 0 ? 4 : index);
+            st.can_leave = true;
+            sx::draw_profile_picker(list, env, st, 1.0f);
+            sx::EditorState e;
+            e.is_new = is_new;
+            e.profile = is_new ? sx::ProfileEntry{"Profile 5", "", 0x2fb0b8} : st.items[static_cast<std::size_t>(index)];
+            e.colour_index = sx::profile_colour_index(e.profile.colour);
+            e.signed_in = !e.profile.email.empty();
+            e.row = row;
+            sx::draw_profile_editor(list, env, e, 1.0f);
+            rig.shot(name, backdrop, list);
+        };
+        editor(0, false, 1, "profiles-6-editor");
+        editor(3, false, 2, "profiles-7-editor-not-signed-in");
+        editor(-1, true, 0, "profiles-8-editor-new");
+        {
+            sx::SettingsContent sc;
+            sx::preview::load_settings(&sc);
+            sx::SettingRow r;
+            r.kind = sx::SettingRow::Kind::value;
+            r.label = "Change profile";
+            r.value = "Alex";
+            r.help = "Choose who is watching, or add a profile. Each profile has its own Stremio account, library, Continue Watching and addons. Press Cross.";
+            sc.rows.insert(sc.rows.begin() + 1, r);
+            sx::Settings sp(env);
+            sp.set_content(&sc);
+            sp.enter();
+            settle(sp, 90);
+            press(sp, Direction::down, 40);
+            settle(sp, 30);
+            shoot(sp, "profiles-9-settings-row");
+        }
+    }
+    if (wants("update"))
+    {
+        sx::BoardContent content;
+        if (!sx::preview::load_board(rig.renderer, art, &content))
+            return 1;
+        sx::Board board(env);
+        board.set_content(&content);
+        board.enter();
+        settle(board, 90);
+        const auto dialog = [&](sx::UpdateState u, float clock, const char *name) {
+            hui::gfx::DrawList list;
+            hui::gfx::BackdropSpec backdrop;
+            board.draw(list, backdrop);
+            sx::draw_update(list, env, u, clock, 1.0f);
+            rig.shot(name, backdrop, list);
+        };
+        sx::UpdateState u;
+        u.version = "1.1";
+        u.current = "1.0";
+        u.size = "29.5 MB";
+        u.notes = {"Profiles: one Stremio account per person", "A new Who's watching? screen", "Update the app from inside the app"};
+        dialog(u, 0.0f, "update-1-offer");
+        u.selected = 1;
+        dialog(u, 0.0f, "update-2-offer-later");
+        u.selected = 0;
+        u.test_build = true;
+        dialog(u, 0.0f, "update-3-offer-test");
+        u.phase = sx::UpdateState::Phase::downloading;
+        u.progress = 0.42f;
+        u.detail = "12.4 of 29.5 MB";
+        u.left = "about 8 s left";
+        dialog(u, 0.0f, "update-4-downloading");
+        u.phase = sx::UpdateState::Phase::installing;
+        dialog(u, 1.2f, "update-5-installing");
+        u.phase = sx::UpdateState::Phase::closing;
+        dialog(u, 0.0f, "update-6-closing");
+        u.phase = sx::UpdateState::Phase::failed;
+        u.message = "The payload loader did not answer (port 9021). Is it running?";
+        dialog(u, 0.0f, "update-7-failed");
+        u.phase = sx::UpdateState::Phase::current;
+        dialog(u, 0.0f, "update-8-current");
     }
     return rig.ok ? 0 : 1;
 }

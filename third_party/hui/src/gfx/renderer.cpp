@@ -21,7 +21,7 @@ constexpr const char *kBlurVertex = R"(
 out vec2 v_uv;
 void main()
 {
-    vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
+    vec2 p = vec2[3](vec2(0.0, 0.0), vec2(2.0, 0.0), vec2(0.0, 2.0))[gl_VertexID];
     v_uv = p;
     gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
 }

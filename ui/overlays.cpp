@@ -31,6 +31,26 @@ void panel(hui::gfx::DrawList &list, const Rect &r, float radius, float fill_alp
     list.bordered_rect(r, radius, Color::rgb(0x0d0b16, std::max(fill_alpha, 0.995f)), 1.5f, theme::hairline);
 }
 
+// The cursor's ring glides between rows (pos is a fraction while it moves). A row's fill rises as the ring
+// comes to it, so the highlight is one continuous movement and not a jump.
+float row_weight(float pos, int i)
+{
+    return std::max(0.0f, 1.0f - std::fabs(pos - static_cast<float>(i)));
+}
+
+// Panels arrive from a little smaller and a little lower, and leave the way they came.
+void panel_in(hui::gfx::DrawList &list, const Rect &r, float t)
+{
+    list.push_opacity(t);
+    list.push_transform(0.96f + 0.04f * t, r.cx(), r.cy(), 0.0f, (1.0f - t) * 12.0f);
+}
+
+void panel_out(hui::gfx::DrawList &list)
+{
+    list.pop_transform();
+    list.pop_opacity();
+}
+
 void tick(hui::gfx::DrawList &list, float x, float cy, float size, Color colour)
 {
     list.line(x, cy + size * 0.05f, x + size * 0.33f, cy + size * 0.40f, 3.6f, colour);
@@ -195,8 +215,7 @@ void draw_dialog(hui::gfx::DrawList &list, const Env &env, const DropdownState &
     const float choices_h = static_cast<float>(n) * kRow + static_cast<float>(std::max(0, n - 1)) * kGap;
     const float h = kPad + kPosterH + 38.0f + choices_h + kPad;
     const Rect r{(theme::kScreenW - kW) * 0.5f, (theme::kScreenH - h) * 0.5f - 34.0f, kW, h};
-    list.push_opacity(t);
-    list.push_transform(0.95f + 0.05f * t, r.cx(), r.cy(), 0.0f, 0.0f);
+    panel_in(list, r, t);
     panel(list, r, 46.0f, 1.0f);
 
     // What it is about: the poster, then the name, the line under it and how far it is watched.
@@ -248,21 +267,28 @@ void draw_dialog(hui::gfx::DrawList &list, const Env &env, const DropdownState &
         list.rounded_rect({tx, y + 12.0f, std::max(8.0f, bw * std::min(1.0f, s.progress)), 8.0f}, 4.0f, theme::accent_soft);
     }
 
-    // The choices.
-    float cy = poster.y + kPosterH + 38.0f;
+    // The choices: plain rows, a ring that glides to the one under the cursor, then the words.
+    const float cy0 = poster.y + kPosterH + 38.0f;
+    const float pos = s.pos >= 0.0f ? s.pos : static_cast<float>(s.selected);
     for (int i = 0; i < n; ++i)
     {
-        const Rect row{r.x + kPad, cy, kW - 2.0f * kPad, kRow};
-        const bool selected = i == s.selected, danger = i == s.danger;
-        if (selected)
-        {
-            list.glow(row, 28.0f, 24.0f, (danger ? Color::rgb(0xff5d5d) : theme::accent).with_alpha(0.34f));
-            list.bordered_rect(row, 28.0f, danger ? Color::rgb(0x3a1820) : theme::surface_hi, 3.0f, Color::rgb(0xffffff));
-        }
-        else
-        {
-            list.rounded_rect(row, 28.0f, Color::rgb(0xffffff, 0.055f));
-        }
+        const Rect row{r.x + kPad, cy0 + static_cast<float>(i) * (kRow + kGap), kW - 2.0f * kPad, kRow};
+        list.rounded_rect(row, 28.0f, Color::rgb(0xffffff, 0.055f + 0.075f * row_weight(pos, i)));
+    }
+    if (n > 0)
+    {
+        const float f = std::clamp(pos, 0.0f, static_cast<float>(n - 1));
+        const Rect ring{r.x + kPad, cy0 + f * (kRow + kGap), kW - 2.0f * kPad, kRow};
+        const int near = static_cast<int>(std::lround(f));
+        const bool danger = near == s.danger;
+        list.glow(ring, 28.0f, 24.0f, (danger ? Color::rgb(0xff5d5d) : theme::accent).with_alpha(0.34f));
+        list.bordered_rect(ring, 28.0f, Color::rgb(0xffffff, 0.0f), 3.0f, Color::rgb(0xffffff));
+    }
+    for (int i = 0; i < n; ++i)
+    {
+        const Rect row{r.x + kPad, cy0 + static_cast<float>(i) * (kRow + kGap), kW - 2.0f * kPad, kRow};
+        const bool selected = i == static_cast<int>(std::lround(std::clamp(pos, 0.0f, static_cast<float>(std::max(0, n - 1)))));
+        const bool danger = i == s.danger;
         const hui::ui::FontRef &face = selected ? env.fonts.semibold : env.fonts.regular;
         const Color ink = danger ? Color::rgb(0xff8585) : selected ? theme::ink : theme::ink_2;
         text(list, face, face.font->fit(s.options[static_cast<std::size_t>(i)], 30.0f, row.w - 150.0f), row.x + 36.0f, row.cy() + 10.0f,
@@ -270,7 +296,6 @@ void draw_dialog(hui::gfx::DrawList &list, const Env &env, const DropdownState &
         if (selected)
             hui::ui::draw_button(list, env.fonts, hui::ui::GlyphStyle::dark(), hui::ui::Button::cross, row.x + row.w - 36.0f - 38.0f,
                                  row.cy(), 38.0f);
-        cy += kRow + kGap;
     }
 
     // What to press.
@@ -286,8 +311,7 @@ void draw_dialog(hui::gfx::DrawList &list, const Env &env, const DropdownState &
     list.bordered_rect({r.cx() - hw * 0.5f - 34.0f, layout.cy - 32.0f, hw + 68.0f, 64.0f}, 32.0f, Color::rgb(0x0d0b16, 0.97f), 1.5f,
                        theme::hairline);
     hui::ui::draw_hints(list, env.fonts, hui::ui::GlyphStyle::dark(), hints, 2, r.cx() - hw * 0.5f, false, layout);
-    list.pop_transform();
-    list.pop_opacity();
+    panel_out(list);
 }
 void draw_dropdown(hui::gfx::DrawList &list, const Env &env, const DropdownState &s, float t)
 {
@@ -302,7 +326,7 @@ void draw_dropdown(hui::gfx::DrawList &list, const Env &env, const DropdownState
     const float extra = s.message.empty() ? 0.0f : 46.0f;
     const Rect r{theme::kScreenW * 0.5f - 310.0f, 130.0f, 620.0f, 150.0f + extra + static_cast<float>(visible) * 76.0f};
     list.push_opacity(t);
-    list.push_transform(0.96f + 0.04f * t, r.cx(), r.y, 0.0f, 0.0f);
+    list.push_transform(0.96f + 0.04f * t, r.cx(), r.y, 0.0f, -(1.0f - t) * 12.0f);
     panel(list, r, 34.0f, 0.97f);
     text(list, env.fonts.semibold, env.fonts.semibold.font->fit(s.title, 34.0f, r.w - 88.0f), r.x + 44.0f, r.y + 82.0f,
          34.0f, theme::ink);
@@ -310,20 +334,24 @@ void draw_dropdown(hui::gfx::DrawList &list, const Env &env, const DropdownState
         text(list, env.fonts.regular, env.fonts.regular.font->fit(s.message, 26.0f, r.w - 88.0f), r.x + 44.0f, r.y + 128.0f,
              26.0f, theme::ink_2);
     list.push_clip({r.x, r.y + 110.0f + extra, r.w, r.h - 126.0f - extra});
-    for (int i = 0; i < static_cast<int>(s.options.size()); ++i)
+    const int count = static_cast<int>(s.options.size());
+    const float pos = s.pos >= 0.0f ? s.pos : static_cast<float>(s.selected);
+    const float f = std::clamp(pos, 0.0f, static_cast<float>(std::max(0, count - 1)));
+    const int near = static_cast<int>(std::lround(f));
+    const auto row_rect = [&](float i) { return Rect{r.x + 28.0f, r.y + 118.0f + extra + i * 76.0f, r.w - 56.0f, 66.0f}; };
+    for (int i = 0; i < count; ++i)
+        list.rounded_rect(row_rect(static_cast<float>(i)), 20.0f, Color::rgb(0xffffff, 0.05f + 0.08f * row_weight(pos, i)));
+    if (count > 0)
     {
-        const Rect row{r.x + 28.0f, r.y + 118.0f + extra + static_cast<float>(i) * 76.0f, r.w - 56.0f, 66.0f};
-        const bool selected = i == s.selected;
+        const Rect ring = row_rect(f);
+        list.glow(ring, 20.0f, 20.0f, (near == s.danger ? Color::rgb(0xff5d5d) : theme::accent).with_alpha(0.32f));
+        list.bordered_rect(ring, 20.0f, Color::rgb(0xffffff, 0.0f), 3.0f, Color::rgb(0xffffff));
+    }
+    for (int i = 0; i < count; ++i)
+    {
+        const Rect row = row_rect(static_cast<float>(i));
+        const bool selected = i == near;
         const bool danger = i == s.danger;
-        if (selected)
-        {
-            list.glow(row, 20.0f, 20.0f, (danger ? Color::rgb(0xff5d5d) : theme::accent).with_alpha(0.32f));
-            list.bordered_rect(row, 20.0f, theme::surface_hi, 3.0f, Color::rgb(0xffffff));
-        }
-        else
-        {
-            list.rounded_rect(row, 20.0f, Color::rgb(0xffffff, 0.05f));
-        }
         const bool active = i == s.active;
         if (active)
             tick(list, row.x + 26.0f, row.cy(), 24.0f, theme::accent_soft);
@@ -386,7 +414,7 @@ void draw_sign_in(hui::gfx::DrawList &list, const Env &env, const SignInState &s
     scrim(list, t, 0.94f);
     const Rect r{260.0f, 140.0f, 1400.0f, 800.0f};
     list.push_opacity(t);
-    list.push_transform(0.97f + 0.03f * t, r.cx(), r.cy(), 0.0f, 0.0f);
+    list.push_transform(0.96f + 0.04f * t, r.cx(), r.cy(), 0.0f, (1.0f - t) * 12.0f);
     panel(list, r, 40.0f, 0.98f);
     if (env.icons.logo != 0)
         list.image(env.icons.logo, {r.x + 64.0f, r.y + 52.0f, 76.0f, 76.0f}, kFullUv, Color::rgb(0xffffff));

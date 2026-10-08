@@ -119,3 +119,65 @@ HttpResponse http_post_json(const std::string& url, const std::string& body, lon
                             const std::atomic<bool>* cancel) {
 	return perform(url, &body, timeout_s, cancel, {});
 }
+
+// ---------------------------------------------------------------------------
+
+namespace {
+struct SinkState {
+	const std::function<bool(const char*, size_t)>* sink;
+	bool stopped = false;
+};
+
+size_t sink_cb(char* ptr, size_t size, size_t nmemb, void* userdata) {
+	auto* st = static_cast<SinkState*>(userdata);
+	if (!(*st->sink)(ptr, size * nmemb)) {
+		st->stopped = true;
+		return 0;
+	}
+	return size * nmemb;
+}
+}  // namespace
+
+HttpResponse http_download(const std::string& url, const std::function<bool(const char*, size_t)>& sink,
+                           const std::atomic<bool>* cancel, const std::vector<std::string>& headers) {
+	HttpResponse r;
+	CURL* c = curl_easy_init();
+	if (!c) {
+		r.error = "curl_easy_init failed";
+		return r;
+	}
+	char errbuf[CURL_ERROR_SIZE] = {0};
+	struct curl_slist* hdrs = nullptr;
+	for (auto& h : headers) hdrs = curl_slist_append(hdrs, h.c_str());
+	SinkState st{&sink};
+	curl_easy_setopt(c, CURLOPT_URL, url.c_str());
+	curl_easy_setopt(c, CURLOPT_USERAGENT, kUserAgent);
+	curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L);
+	curl_easy_setopt(c, CURLOPT_MAXREDIRS, 8L);
+	curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 15L);
+	// No overall time limit (the file is large): it ends if nothing arrives for 30 s.
+	curl_easy_setopt(c, CURLOPT_LOW_SPEED_LIMIT, 1L);
+	curl_easy_setopt(c, CURLOPT_LOW_SPEED_TIME, 30L);
+	curl_easy_setopt(c, CURLOPT_NOSIGNAL, 1L);
+	curl_easy_setopt(c, CURLOPT_IPRESOLVE, CURL_IPRESOLVE_V4);
+	curl_easy_setopt(c, CURLOPT_ERRORBUFFER, errbuf);
+	curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, sink_cb);
+	curl_easy_setopt(c, CURLOPT_WRITEDATA, &st);
+	if (!g_ca_bundle.empty() && file_exists(g_ca_bundle)) curl_easy_setopt(c, CURLOPT_CAINFO, g_ca_bundle.c_str());
+	http_setup_handle(c);
+	if (cancel) {
+		curl_easy_setopt(c, CURLOPT_NOPROGRESS, 0L);
+		curl_easy_setopt(c, CURLOPT_XFERINFOFUNCTION, progress_cb);
+		curl_easy_setopt(c, CURLOPT_XFERINFODATA, (void*)cancel);
+	}
+	if (hdrs) curl_easy_setopt(c, CURLOPT_HTTPHEADER, hdrs);
+	const CURLcode rc = curl_easy_perform(c);
+	if (rc != CURLE_OK) {
+		r.error = st.stopped ? "stopped" : (errbuf[0] ? errbuf : curl_easy_strerror(rc));
+		if (cancel && cancel->load()) r.error = "cancelled";
+	}
+	curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &r.status);
+	if (hdrs) curl_slist_free_all(hdrs);
+	curl_easy_cleanup(c);
+	return r;
+}

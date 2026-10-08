@@ -92,6 +92,10 @@ python3 "$NATIVE/check_imports.py" "$B/pie.elf" "$SDK/target/lib" "$B/stubs" "$G
 	--stub "$B/stubs/libSceVideodec2.so" --stub "$GL/lib/libSceAgc.so" --stub "$GL/lib/libSceAgcDriver.so" \
 	--module-sdk 0x02000009 --companion-sdk 0x08050001 --file-name eboot.elf >/dev/null
 
+echo ">> update helper"
+# A payload for the console's loader (port 9021): the app sends it there to replace its own image (updater/main.cpp).
+"$CXX" -std=c++20 -O2 -w -fno-exceptions -fno-rtti -Wl,--build-id=none -o "$B/stremio-updater.elf" "$ROOT/updater/main.cpp"
+
 echo ">> packaging $TITLE"
 APP=$B/$TITLE
 mkdir -p "$APP/sce_sys" "$APP/sce_module"
@@ -118,6 +122,7 @@ cp "$HUI"/assets/fonts/*.huifont "$HUI"/assets/fonts/*LICENSE*.txt "$APP/hui-fon
 cp "$ROOT"/app/assets/icons_4k/*.png "$APP/icons/"
 cp -r "$ROOT/app/sounds" "$APP/sounds"
 cp "$ROOT/app/ca-bundle.crt" "$APP/"
+cp "$B/stremio-updater.elf" "$APP/"
 # License notices travel with the app: the GPL, the component list, the license text of everything it
 # contains (app/licenses/README.txt), and the notices of the toolkit and the OpenGL SDK.
 cp -r "$ROOT/app/licenses" "$APP/"
@@ -134,6 +139,6 @@ rm -rf "$OUT/$TITLE" "$OUT/$TITLE.zip" "$OUT/$TITLE.ffpfsc"
 cp -r "$APP" "$OUT/$TITLE"
 # One image file with the permissions inside (copy tools can't strip them: PS5 Upload drops the execute
 # bit from loose files, and the console then refuses to start eboot.bin).
-"$MKPFS" pack folder --no-adjust-output-file-extension --version PS5 --verify "$APP" "$OUT/$TITLE.ffpfsc" >/dev/null 2>&1
+"$MKPFS" pack folder --no-adjust-output-file-extension --version PS5 --verify --compression-backend zlib "$APP" "$OUT/$TITLE.ffpfsc" >/dev/null 2>&1
 if command -v zip >/dev/null; then (cd "$OUT" && zip -qr "$TITLE.zip" "$TITLE"); fi
 ls -la "$OUT"

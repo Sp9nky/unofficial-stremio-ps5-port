@@ -13,7 +13,9 @@
 #include "library.hpp"
 #include "overlays.hpp"
 #include "player.hpp"
+#include "profiles.hpp"
 #include "settings.hpp"
+#include "update.hpp"
 #include "../gl/session.hpp"
 #include "../gl/ui_sound.hpp"
 
@@ -56,6 +58,12 @@ class Shell
     void route_detail(const hui::InputFrame &input, float dt);
     void apply_changes();
     void leave_title();
+    // Profiles: the picker ("Who's watching?") and the editor over it.
+    void open_picker(bool can_leave);
+    void fill_picker();
+    void open_editor(int index); // -1: a new profile
+    void route_profiles(const hui::InputFrame &input, float dt);
+    void profile_chosen(int index);
 
     const Env &env_;
     Session &s_;
@@ -81,8 +89,24 @@ class Shell
     float watch_t_ = 0.0f;   // seconds since the launch screen came up
     float typing_hold_ = 0.0f; // the keyboard's last button presses are not ours
     bool was_watching_ = false;
+    enum class Layer
+    {
+        none,
+        picker,
+        editor,
+    };
+    Layer layer_ = Layer::none;
+    ProfilesState pstate_;
+    EditorState estate_;
+    int pick_ = 0;       // the tile the cursor is on (the last one is "Add profile")
+    int edit_index_ = -1;
+    std::string edit_id_;
+    unsigned profiles_seen_ = 0;
+    hui::tween::Spring pfocus_, pick_t_, edit_t_;
     // The pop-ups fade in and out.
-    hui::tween::Spring dropdown_t_, sign_in_t_, toast_t_;
+    hui::tween::Spring dropdown_t_, sign_in_t_, toast_t_, update_t_;
+    // The cursor ring of each dialog glides between rows, and the update bar follows its value.
+    hui::tween::Spring dd_pos_, up_pos_, up_prog_, ed_pos_;
 };
 
 } // namespace sx

@@ -49,6 +49,24 @@ watch it, all with the DualSense.
 
 The titles and artwork in these pictures are invented (made by `tools/preview`).
 
+## What's new in 1.1
+
+- **Profiles.** One Stremio account per person on the same console: each profile has its
+  own sign-in, library, Continue Watching, addons and settings. With more than one profile,
+  a **Who's watching?** screen opens first (← → to move, ✕ to watch, ▢ to edit). Add, rename,
+  recolour or remove a profile there, or open it any time from **Settings, Change profile**.
+  A new profile signs in with its own QR code. Your current sign-in becomes the first profile.
+- **Updates from inside the app.** Stremio checks GitHub for a newer version when it starts
+  (and in **Settings, Check for updates**), shows what changed, downloads it with a progress
+  bar, checks it against the checksum GitHub publishes, and replaces its own image: you do
+  not have to copy files by hand any more. It needs a payload loader on port 9021 (the one
+  that runs your homebrew) and the image in `/data/homebrew`. The old image is kept next to the
+  new one as `PPSA77711.ffpfsc.old`, and the steps are logged to `/data/stremio-update.log`.
+- **Smoother dialogs.** Dialogs open and close with one soft motion, the cursor glides between
+  choices, and the update bar moves smoothly.
+- **Shaders changed to avoid a console compiler bug** that could stop the app at start-up
+  in some builds.
+
 ## What's new in 1.0
 
 **A full redesign.** The whole interface is new: it keeps Stremio's look and is
@@ -122,6 +140,8 @@ Fewer buffering stops:
 - **Player** (FFmpeg, hardware decoding) with subtitles (from addons), audio
   track selection, seeking, and resume (Continue Watching).
 - **Torrent statistics** (peers, speed, progress) while a torrent starts.
+- **Profiles**: one Stremio account per person, chosen on a Who's watching? screen.
+- **Updates inside the app**: it finds, downloads, verifies and installs new versions.
 - **One native app**: no launcher, no payload sender and no server needed.
 
 ## Requirements
@@ -141,7 +161,8 @@ Fewer buffering stops:
    the home screen.
 4. In **Settings**, sign in to your Stremio account.
 
-To update (also from 0.x), close Stremio first, delete the old
+From 1.1 you can update inside the app (**Settings, Check for updates**, or the message at
+start-up). To update by hand (also from 0.x or 1.0), close Stremio first, delete the old
 `PPSA77711.ffpfsc`, wait a few seconds, then copy the new one. (If the image is
 replaced while the app is running, the console keeps the old icon and
 backgrounds.)
@@ -277,7 +298,10 @@ developers; thank you to all of them:
   OpenGNM PSBC; and
   [ps5-native-app-boilerplate](https://github.com/blackbearreloaded/ps5-native-app-boilerplate),
   the native-app foundation and tooling (with parts derived from
-  [SharpProspero](https://github.com/SvenGDK/SharpProspero) by SvenGDK).
+  [SharpProspero](https://github.com/SvenGDK/SharpProspero) by SvenGDK). The
+  self-update notes of its [ProsperoStore](https://github.com/blackbearreloaded/ProsperoStore)
+  inspired how this app updates itself (a helper started through the payload loader);
+  no code was taken from it: the helper and the update code were written for this app.
 - The [ps5-payload-sdk](https://github.com/ps5-payload-dev/sdk) and its
   [PacBrew](https://github.com/ps5-payload-dev/pacbrew-repo) libraries
   (FFmpeg, libcurl, OpenSSL, libwebp, GNU FriBidi, miniupnpc and more).

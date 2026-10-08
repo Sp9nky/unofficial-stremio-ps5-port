@@ -29,6 +29,8 @@ namespace
 GLuint compile(const char *label, GLenum stage, const char *source)
 {
     const char *sources[] = {g_glsl_prefix, source};
+    // Logged first: if the console's compiler stops on a shader, the log says which.
+    sys::log("[HUI] compiling %s (%s)", label, stage == GL_VERTEX_SHADER ? "vertex" : "fragment");
     GLuint shader = glCreateShader(stage);
     glShaderSource(shader, 2, sources, nullptr);
     glCompileShader(shader);

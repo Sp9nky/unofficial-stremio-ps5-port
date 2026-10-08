@@ -16,7 +16,7 @@ namespace
 constexpr const char *kVertex = R"(
 void main()
 {
-    vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
+    vec2 p = vec2[3](vec2(0.0, 0.0), vec2(2.0, 0.0), vec2(0.0, 2.0))[gl_VertexID];
     gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
 }
 )";
@@ -148,9 +148,9 @@ void main()
     else if (u_mode == 5) // waves
     {
         col = mix(c0, c1, uv.y);
-        for (int i = 0; i < 5; ++i)
+        for (float fi = 0.0; fi < 5.0; fi += 1.0)
         {
-            float fi = float(i);
+            
             float y = 0.42 + fi * 0.1 +
                       0.05 * sin(uv.x * (2.0 + fi * 0.7) + u_time * (0.25 + 0.07 * fi) + fi * 1.7) +
                       0.025 * sin(uv.x * (5.0 + fi) - u_time * 0.2 + fi);
@@ -163,9 +163,9 @@ void main()
     {
         col = mix(c0, c1, uv.y);
         vec2 p = vec2(uv.x * aspect, uv.y);
-        for (int i = 0; i < 16; ++i)
+        for (float fi = 0.0; fi < 16.0; fi += 1.0)
         {
-            float fi = float(i);
+            
             float h1 = hash(vec2(fi, 1.3));
             float h2 = hash(vec2(fi, 7.9));
             float h3 = hash(vec2(fi, 13.1));
@@ -205,9 +205,9 @@ void main()
         vec2 s = vec2((uv.x - 0.72) * aspect, uv.y - 0.3);
         col += vec3(1.0, 0.9, 0.7) * 0.55 * exp(-dot(s, s) * 26.0);
         col = mix(col, vec3(1.0, 0.96, 0.84), smoothstep(0.062, 0.058, length(s)));
-        for (int i = 0; i < 4; ++i)
+        for (float fi = 0.0; fi < 4.0; fi += 1.0)
         {
-            float fi = float(i);
+            
             float depth = fi / 3.0;
             float x = uv.x * (1.2 + fi * 0.6) + u_time * u_params.x * (0.02 + 0.05 * fi * fi) +
                       fi * 13.7;

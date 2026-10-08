@@ -107,6 +107,8 @@ void Shell::apply_changes()
         addons_.refresh();
     if (c & Session::kSettings)
         settings_.refresh();
+    if (s_.take_profile_picker() && layer_ == Layer::none)
+        open_picker(true);
     if (c & Session::kDetail)
         detail_.refresh();
     if (c & Session::kSearchNew)
@@ -131,6 +133,191 @@ void Shell::apply_changes()
     {
         sound_.play(hui::audio::Cue::tab);
         go_page(static_cast<int>(page));
+    }
+}
+
+// ---- profiles ----------------------------------------------------------------------------------------
+
+void Shell::fill_picker()
+{
+    pstate_.items.clear();
+    const auto &list = s_.profiles();
+    for (int i = 0; i < static_cast<int>(list.size()); ++i)
+    {
+        ProfileEntry e;
+        e.name = list[static_cast<std::size_t>(i)].name;
+        e.colour = list[static_cast<std::size_t>(i)].colour;
+        e.email = s_.profile_email(i);
+        pstate_.items.push_back(e);
+    }
+    profiles_seen_ = s_.profiles_revision();
+}
+
+void Shell::open_picker(bool can_leave)
+{
+    fill_picker();
+    pstate_.can_leave = can_leave;
+    pick_ = s_.profile_active();
+    pfocus_.snap(static_cast<float>(pick_));
+    pick_t_.snap(0.0f);
+    layer_ = Layer::picker;
+}
+
+void Shell::open_editor(int index)
+{
+    const auto &list = s_.profiles();
+    estate_ = EditorState();
+    edit_index_ = index;
+    estate_.is_new = index < 0;
+    if (index >= 0 && index < static_cast<int>(list.size()))
+    {
+        estate_.profile = pstate_.items[static_cast<std::size_t>(index)];
+        edit_id_ = list[static_cast<std::size_t>(index)].id;
+        estate_.colour_index = profile_colour_index(estate_.profile.colour);
+        estate_.profile.colour = profile_colour(estate_.colour_index);
+        estate_.signed_in = !estate_.profile.email.empty();
+    }
+    else
+    {
+        edit_id_.clear();
+        estate_.profile.name = "Profile " + std::to_string(list.size() + 1);
+        estate_.colour_index = static_cast<int>(list.size()) % kProfileColours;
+        estate_.profile.colour = profile_colour(estate_.colour_index);
+    }
+    estate_.row = 0;
+    edit_t_.snap(0.0f);
+    layer_ = Layer::editor;
+}
+
+// A profile was picked: it is loaded and the Board shown (or Settings again if it is the same one).
+void Shell::profile_chosen(int index)
+{
+    const bool changed = index != s_.profile_active();
+    s_.profile_select(index);
+    layer_ = Layer::none;
+    go_page(changed ? 0 : page_);
+}
+
+void Shell::route_profiles(const hui::InputFrame &input, float dt)
+{
+    (void)dt;
+    // Something changed the list (a profile removed): the picker is made again, the editor closes if its
+    // profile is gone.
+    if (profiles_seen_ != s_.profiles_revision())
+    {
+        fill_picker();
+        pick_ = std::clamp(pick_, 0, static_cast<int>(pstate_.items.size()));
+        pfocus_.target = static_cast<float>(pick_);
+        if (layer_ == Layer::editor && !estate_.is_new)
+        {
+            const auto &list = s_.profiles();
+            const bool there = std::any_of(list.begin(), list.end(), [&](const Session::ProfileInfo &p) { return p.id == edit_id_; });
+            if (!there)
+                layer_ = Layer::picker;
+        }
+    }
+    const int count = static_cast<int>(pstate_.items.size());
+    if (layer_ == Layer::picker)
+    {
+        if (input.nav == Direction::left)
+            pick_ = std::max(0, pick_ - 1);
+        else if (input.nav == Direction::right)
+            pick_ = std::min(count, pick_ + 1);
+        pfocus_.target = static_cast<float>(pick_);
+        if (input.is_pressed(Action::confirm))
+        {
+            if (pick_ < count)
+                profile_chosen(pick_);
+            else
+                open_editor(-1);
+        }
+        else if (input.is_pressed(Action::west) && pick_ < count)
+        {
+            open_editor(pick_);
+        }
+        else if (input.is_pressed(Action::back) && pstate_.can_leave)
+        {
+            layer_ = Layer::none;
+            go_page(page_);
+        }
+        return;
+    }
+    // The editor.
+    EditorState &e = estate_;
+    const int last = e.is_new ? 3 : 4;
+    if (input.nav == Direction::up)
+        e.row = std::max(0, e.row - 1);
+    else if (input.nav == Direction::down)
+        e.row = std::min(last, e.row + 1);
+    else if (e.row == 1 && (input.nav == Direction::left || input.nav == Direction::right))
+    {
+        e.colour_index = std::clamp(e.colour_index + (input.nav == Direction::right ? 1 : -1), 0, kProfileColours - 1);
+        e.profile.colour = profile_colour(e.colour_index);
+    }
+    if (input.is_pressed(Action::back))
+    {
+        layer_ = Layer::picker;
+        return;
+    }
+    if (!input.is_pressed(Action::confirm))
+        return;
+    const auto save_and_close = [&]() {
+        if (e.is_new)
+        {
+            const int index = s_.profile_add(e.profile.name, e.profile.colour);
+            s_.profile_select(index);
+            layer_ = Layer::none;
+            go_page(0);
+            s_.profile_sign_in(); // its own account: the QR code comes up at once
+        }
+        else
+        {
+            s_.profile_update(edit_index_, e.profile.name, e.profile.colour);
+            fill_picker();
+            layer_ = Layer::picker;
+        }
+    };
+    switch (e.row)
+    {
+    case 0:
+        s_.profile_ask_name([this](const std::string &v) {
+            std::string n = v;
+            while (!n.empty() && n.back() == ' ')
+                n.pop_back();
+            if (!n.empty())
+                estate_.profile.name = n.size() > 24 ? n.substr(0, 24) : n;
+        });
+        break;
+    case 1:
+        e.colour_index = (e.colour_index + 1) % kProfileColours;
+        e.profile.colour = profile_colour(e.colour_index);
+        break;
+    case 2:
+        if (e.signed_in)
+        {
+            s_.say("To sign out, use Settings, Stremio account.", 5.0);
+        }
+        else if (e.is_new)
+        {
+            save_and_close();
+        }
+        else
+        {
+            // Saved, loaded, and the QR code up: the sign-in belongs to the profile that is loaded.
+            s_.profile_update(edit_index_, e.profile.name, e.profile.colour);
+            s_.profile_select(edit_index_);
+            layer_ = Layer::none;
+            go_page(0);
+            s_.profile_sign_in();
+        }
+        break;
+    case 3:
+        save_and_close();
+        s_.cue(hui::audio::Cue::saved);
+        break;
+    default:
+        s_.profile_remove_ask(edit_index_);
+        break;
     }
 }
 
@@ -291,7 +478,8 @@ void Shell::route_page(const hui::InputFrame &input, float dt)
 
 unsigned Shell::view_key() const
 {
-    return static_cast<unsigned>(screen_) * 64u + static_cast<unsigned>(page_) + (s_.dropdown_open ? 1000u : 0u);
+    return static_cast<unsigned>(screen_) * 64u + static_cast<unsigned>(page_) + (s_.dropdown_open ? 1000u : 0u) +
+           static_cast<unsigned>(layer_) * 5000u;
 }
 
 unsigned Shell::focus_signature()
@@ -325,6 +513,11 @@ unsigned Shell::focus_signature()
     mix(detail_.stream_index());
     mix(detail_.episode_index());
     mix(s_.dropdown_open ? s_.dropdown.selected : -1);
+    mix(s_.update_open ? s_.update_dialog.selected : -1);
+    mix(static_cast<int>(layer_));
+    mix(pick_);
+    mix(estate_.row);
+    mix(estate_.colour_index);
     return h;
 }
 void Shell::update(const hui::InputFrame &input, float dt)
@@ -347,7 +540,22 @@ void Shell::update(const hui::InputFrame &input, float dt)
         return f;
     }();
 
-    if (s_.dropdown_open)
+    if (s_.update_open)
+    {
+        UpdateState &u = s_.update_dialog;
+        if (u.phase == UpdateState::Phase::offer)
+        {
+            if (input.nav == Direction::up)
+                u.selected = 0;
+            else if (input.nav == Direction::down)
+                u.selected = 1;
+        }
+        if (input.is_pressed(Action::confirm))
+            s_.update_confirm();
+        else if (input.is_pressed(Action::back))
+            s_.update_back();
+    }
+    else if (s_.dropdown_open)
     {
         DropdownState &d = s_.dropdown;
         const int count = static_cast<int>(d.options.size());
@@ -381,13 +589,16 @@ void Shell::update(const hui::InputFrame &input, float dt)
         boot_out_ = 0.0f;
         board_.enter();
         sound_.play(hui::audio::Cue::welcome);
+        // More than one person uses this console: who is watching comes first.
+        if (s_.profiles().size() > 1)
+            open_picker(false);
     }
     else
     {
         boot_out_ += dt;
     }
     const bool booting = boot_out_ < 0.35f;
-    const bool held = s_.dropdown_open || s_.sign_in_open || dropdown_t_.value > 0.3f || typing_hold_ > 0.0f || booting;
+    const bool held = s_.update_open || update_t_.value > 0.3f || s_.dropdown_open || s_.sign_in_open || dropdown_t_.value > 0.3f || typing_hold_ > 0.0f || booting;
     const hui::InputFrame &in = held ? idle : input;
 
     if (s_.watching)
@@ -398,6 +609,10 @@ void Shell::update(const hui::InputFrame &input, float dt)
         s_.watch_input(in);
         player_ui_.state = s_.playing;
         player_ui_.update(dt);
+    }
+    else if (layer_ != Layer::none)
+    {
+        route_profiles(in, dt);
     }
     else if (screen_ == Screen::detail)
     {
@@ -422,12 +637,33 @@ void Shell::update(const hui::InputFrame &input, float dt)
     sound_.update(dt);
     was_watching_ = s_.watching;
 
-    dropdown_t_.target = s_.dropdown_open ? 1.0f : 0.0f;
-    dropdown_t_.update(dt, 22.0f);
-    sign_in_t_.target = s_.sign_in_open ? 1.0f : 0.0f;
-    sign_in_t_.update(dt, 18.0f);
-    toast_t_.target = s_.toast_open ? 1.0f : 0.0f;
-    toast_t_.update(dt, 18.0f);
+    // Dialogs open a little slower than they close; the ring glides at once (and rests on the row when it
+    // is not on show, so a dialog never opens with the ring travelling).
+    const auto fade = [dt](hui::tween::Spring &t, bool on, float in, float out) {
+        t.target = on ? 1.0f : 0.0f;
+        t.update(dt, on ? in : out);
+    };
+    pfocus_.update(dt, 16.0f);
+    pstate_.focus = pfocus_.value;
+    fade(pick_t_, layer_ != Layer::none, 18.0f, 30.0f);
+    fade(edit_t_, layer_ == Layer::editor, 22.0f, 34.0f);
+    fade(update_t_, s_.update_open, 22.0f, 34.0f);
+    fade(dropdown_t_, s_.dropdown_open, 22.0f, 34.0f);
+    fade(sign_in_t_, s_.sign_in_open, 18.0f, 30.0f);
+    const auto ring = [dt](hui::tween::Spring &p, float target, bool shown) {
+        p.target = target;
+        if (!shown)
+            p.snap(target);
+        p.update(dt, 30.0f);
+    };
+    ring(dd_pos_, static_cast<float>(s_.dropdown.selected), s_.dropdown_open);
+    ring(up_pos_, static_cast<float>(s_.update_dialog.selected), s_.update_open);
+    ring(ed_pos_, static_cast<float>(estate_.row), layer_ == Layer::editor);
+    up_prog_.target = s_.update_dialog.progress;
+    if (!s_.update_open || s_.update_dialog.phase != UpdateState::Phase::downloading)
+        up_prog_.snap(s_.update_dialog.progress);
+    up_prog_.update(dt, 8.0f); // a download arrives in steps; the bar does not
+    fade(toast_t_, s_.toast_open, 18.0f, 30.0f);
 }
 
 void Shell::draw(hui::gfx::DrawList &list, hui::gfx::BackdropSpec &backdrop) const
@@ -457,6 +693,17 @@ void Shell::draw(hui::gfx::DrawList &list, hui::gfx::BackdropSpec &backdrop) con
                            hui::gfx::kFullUv, hui::gfx::Color::rgb(0xffffff));
             }
             player_ui_.draw(list);
+        }
+    }
+    else if (layer_ != Layer::none)
+    {
+        apply_page_backdrop(backdrop, clock_);
+        draw_profile_picker(list, env_, pstate_, pick_t_.value);
+        if (edit_t_.value > 0.01f)
+        {
+            EditorState e = estate_;
+            e.pos = ed_pos_.value;
+            draw_profile_editor(list, env_, e, edit_t_.value);
         }
     }
     else if (screen_ == Screen::detail)
@@ -489,7 +736,18 @@ void Shell::draw(hui::gfx::DrawList &list, hui::gfx::BackdropSpec &backdrop) con
         }
     }
     if (dropdown_t_.value > 0.01f)
-        draw_dropdown(list, env_, s_.dropdown, dropdown_t_.value);
+    {
+        DropdownState d = s_.dropdown;
+        d.pos = dd_pos_.value;
+        draw_dropdown(list, env_, d, dropdown_t_.value);
+    }
+    if (update_t_.value > 0.01f)
+    {
+        UpdateState u = s_.update_dialog;
+        u.pos = up_pos_.value;
+        u.progress = up_prog_.value;
+        draw_update(list, env_, u, clock_, update_t_.value);
+    }
     if (sign_in_t_.value > 0.01f)
         draw_sign_in(list, env_, s_.sign_in, clock_, sign_in_t_.value);
     if (toast_t_.value > 0.01f)

@@ -17,10 +17,12 @@
 #include "player.h"
 #include "subtitles.h"
 #include "tasks.h"
+#include "update.hpp"
 #include "audio/cues.hpp"
 #include "core/input.hpp"
 
 #include <atomic>
+#include <cstdint>
 #include <functional>
 #include <map>
 #include <memory>
@@ -136,6 +138,8 @@ class Session
     SignInState sign_in;
     bool toast_open = false;
     ToastState toast;
+    bool update_open = false; // the update dialog (session_update.cpp)
+    UpdateState update_dialog;
 
     // ---- what the screens ask for ----
     void page_opened(Page page);
@@ -191,8 +195,71 @@ class Session
     void close_search();
     void say(const std::string &message, double seconds = 4.0, bool error = false);
 
+    // ---- updating the app (session_update.cpp) ----
+    // Asks GitHub for the newest release. At start it is silent unless there is something to install;
+    // from Settings (manual) it always answers.
+    void update_check(bool manual);
+    void update_confirm(); // Cross on the dialog
+    void update_back();    // Circle on the dialog
+
+    // ---- profiles (session_profiles.cpp) ----
+    // One Stremio account per person: each profile has its own sign-in, library, Continue Watching, addons
+    // and settings, kept in its own folder. Only one is loaded at a time.
+    struct ProfileInfo
+    {
+        std::string id, name;
+        std::uint32_t colour = 0x7b5bf5;
+    };
+    const std::vector<ProfileInfo> &profiles() const
+    {
+        return profiles_;
+    }
+    int profile_active() const
+    {
+        return active_;
+    }
+    // Bumps whenever a profile was added, changed or removed.
+    unsigned profiles_revision() const
+    {
+        return profiles_rev_;
+    }
+    std::string profile_email(int index) const; // empty when that profile is not signed in
+    void profile_select(int index);             // loads that profile's account and library
+    int profile_add(const std::string &name, std::uint32_t colour);
+    void profile_update(int index, const std::string &name, std::uint32_t colour);
+    void profile_remove_ask(int index);         // asks, then removes (at least one always stays)
+    void profile_sign_in();                     // the QR sign-in, for the profile that is loaded
+    void profile_ask_name(const std::function<void(const std::string &)> &done)
+    {
+        ask_text(done);
+    }
+    // Settings > Change profile asks for the picker (the shell shows it).
+    bool take_profile_picker()
+    {
+        const bool r = profile_picker_req_;
+        profile_picker_req_ = false;
+        return r;
+    }
+
   private:
     template <typename T> void bg(std::function<T()> work, std::function<void(T &)> done);
+
+    struct UpdateJob;
+    struct UpdateOffer;
+    void update_start();
+    void update_poll();
+    std::shared_ptr<UpdateJob> update_job_;
+    std::shared_ptr<UpdateOffer> update_offer_;
+    bool update_offer_pending_ = false, update_manual_ = false, update_checked_ = false;
+
+    // profiles
+    void load_profiles();
+    void save_profiles() const;
+    void reset_for_profile();
+    std::string profile_dir(const std::string &id) const;
+    std::string profile_file(const char *name) const; // in the loaded profile's folder
+    std::string profile_name(int index) const;
+    static json prefs_json(const Prefs &p);
 
     // persistence and account
     void load_prefs();
@@ -281,6 +348,10 @@ class Session
     void apply_meta(Item &item) const;
     void want_meta(const Item &item);
 
+    std::vector<ProfileInfo> profiles_;
+    int active_ = 0;
+    unsigned profiles_rev_ = 0;
+    bool profile_picker_req_ = false;
     std::string base_dir_, data_dir_;
     hui::gfx::Renderer *renderer_ = nullptr;
     TexCache tex_;

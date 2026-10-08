@@ -36,6 +36,8 @@ struct DropdownState
     bool dialog = false;
     std::uint32_t poster = 0; // GL texture, 0 for none
     float progress = -1.0f;   // 0..1, negative for none
+    // Where the cursor's ring is drawn, in rows: it glides, so it is a fraction while moving. Negative: on `selected`.
+    float pos = -1.0f;
 };
 void draw_dropdown(hui::gfx::DrawList &list, const Env &env, const DropdownState &state, float t);
 
