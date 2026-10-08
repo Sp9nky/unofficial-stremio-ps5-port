@@ -19,6 +19,7 @@
 #include "overlays.hpp"
 #include "profiles.hpp"
 #include "update.hpp"
+#include "../../gl/hdr_out.hpp"
 #include "page.hpp"
 #include "player.hpp"
 #include "sample.hpp"
@@ -1112,6 +1113,59 @@ int main(int argc, char **argv)
         dialog(u, 0.0f, "update-7-failed");
         u.phase = sx::UpdateState::Phase::current;
         dialog(u, 0.0f, "update-8-current");
+    }
+    if (wants("hdr"))
+    {
+        // The HDR final pass: a known video texture and a known interface, read back and unpacked.
+        const int W = 1920, H = 1080;
+        std::vector<std::uint32_t> words(960 * 540);
+        auto pack = [](int r, int g, int b) { return std::uint32_t(r) | (std::uint32_t(g) << 10) | (std::uint32_t(b) << 20) | (3u << 30); };
+        for (std::size_t i = 0; i < words.size(); ++i)
+            words[i] = pack(600, 300, 900); // a PQ colour: R 600, G 300, B 900 of 1023
+        std::uint32_t tex = 0;
+        int tw = 0, th = 0;
+        if (!sx::hdr::video_upload(&tex, &tw, &th, 960, 540, words.data()))
+        {
+            std::fprintf(stderr, "HDR TEST: 10-bit texture failed\n");
+            return 1;
+        }
+        hui::gfx::DrawList list;
+        list.rounded_rect({100, 100, 300, 200}, 0, hui::gfx::Color::rgb(0xffffff)); // white UI, outside the video
+        list.rounded_rect({600, 400, 200, 200}, 0, hui::gfx::Color::rgb(0xffffff, 0.5f)); // half-white over the video
+        rig.renderer.begin();
+        rig.renderer.draw(list);
+        const hui::gfx::Rect rect{480, 270, 960, 540}; // the video, centred
+        glBindFramebuffer(GL_FRAMEBUFFER, rig.framebuffer);
+        glClearColor(0, 0, 0, 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+        if (!sx::hdr::present(rig.renderer, W, H, tex, rect, rig.framebuffer))
+        {
+            std::fprintf(stderr, "HDR TEST: present failed\n");
+            return 1;
+        }
+        glBindFramebuffer(GL_FRAMEBUFFER, rig.framebuffer);
+        std::vector<unsigned char> px(static_cast<std::size_t>(W) * H * 4);
+        glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+        // (x, y) from the top left, as the picture is laid out; glReadPixels starts at the bottom.
+        auto at = [&](int x, int y) {
+            const unsigned char *p = &px[(static_cast<std::size_t>(H - 1 - y) * W + x) * 4];
+            const std::uint32_t w = std::uint32_t(p[2]) | (std::uint32_t(p[1]) << 8) | (std::uint32_t(p[0]) << 16) | (std::uint32_t(p[3]) << 24);
+            return w;
+        };
+        auto show = [&](const char *name, int x, int y) {
+            const std::uint32_t w = at(x, y);
+            std::fprintf(stderr, "HDR TEST %-22s R %4u G %4u B %4u A %u\n", name, w & 1023, (w >> 10) & 1023, (w >> 20) & 1023, w >> 30);
+        };
+        show("video (expect 600 300 900)", 1000, 300);
+        show("outside video (expect 0)", 300, 800);
+        show("white UI (expect ~594)", 200, 200);
+        show("half UI over video", 700, 500);
+        show("video top-left corner", 485, 275);
+        const std::uint32_t v = at(1000, 300), o = at(300, 800), u = at(200, 200);
+        const bool ok = (v & 1023) == 600 && ((v >> 10) & 1023) == 300 && ((v >> 20) & 1023) == 900 && (v >> 30) == 3 && (o & 1023) == 0 &&
+                        std::abs(int(u & 1023) - 594) <= 4;
+        std::fprintf(stderr, ok ? "HDR TEST OK\n" : "HDR TEST FAIL\n");
+        return ok ? 0 : 1;
     }
     return rig.ok ? 0 : 1;
 }

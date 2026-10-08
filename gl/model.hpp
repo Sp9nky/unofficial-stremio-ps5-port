@@ -51,6 +51,7 @@ struct Prefs
     std::string audio_langs;
     bool autoplay_next = true;
     bool ui_sounds = true; // the interface's soft sounds
+    bool hdr_output = true; // HDR10 and HLG video go out as HDR when the display link runs in HDR
     std::vector<std::string> extra_addons;
     std::string auth_key, user_email;
 };

@@ -126,6 +126,17 @@ class Session
     PlayerState playing;
     std::uint32_t video_texture = 0; // the current picture, 0 until the first one
     int video_w = 0, video_h = 0;
+    // HDR output (gl/hdr_out.cpp): the picture on show is a 10-bit PQ one in its own texture. The shell leaves it
+    // out of the draw list and puts its rectangle (1920 x 1080 layout) in hdr_rect; the HDR pass draws it.
+    bool video_hdr = false;
+    std::uint32_t video_texture_hdr = 0;
+    int video_hdr_w = 0, video_hdr_h = 0;
+    hui::gfx::Rect hdr_rect;
+    // Whether HDR output should be on now (an HDR10 or HLG video is playing and the setting allows it), and the
+    // main loop telling back whether the screen really is in HDR.
+    bool hdr_wanted() const;
+    void set_hdr_scanout(bool on);
+    void hdr_status_changed(const std::string &text); // the HDR output's state changed: say it, and show it in Settings
     bool typing() const
     {
         return ime_.active();
@@ -454,7 +465,8 @@ class Session
     int w_sub_active_ = -1; // index in w_subs_, -1 off
     double w_sub_delay_ = 0;
     double w_info_until_ = 0, w_last_save_ = 0, w_last_saved_pos_ = -1;
-    bool w_started_ = false, w_menu_built_ = false, w_auto_sub_done_ = false, w_heavy_warned_ = false;
+    bool hdr_scanout_ = false;
+    bool w_started_ = false, w_menu_built_ = false, w_auto_sub_done_ = false, w_heavy_warned_ = false, w_colour_warned_ = false;
     bool w_menu_dirty_ = false;
     double w_stats_at_ = 0, w_stats_logged_ = 0;
     int w_gen_ = 0;

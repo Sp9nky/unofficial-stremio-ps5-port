@@ -3,6 +3,7 @@
 // what the screens show is gl/session.cpp.
 
 #include "chrome.hpp"
+#include "hdr_out.hpp"
 #include "core/input.hpp"
 #include "dynamic_font.hpp"
 #include "gfx/renderer.hpp"
@@ -147,6 +148,7 @@ int main()
     icons.logo = load_icon(renderer, icon_dir + "/logo_l.png");
     boot_frame();
 
+    sx::hdr::init(display.width(), display.height());
     static sx::Session session;
     if (!session.init(root, kData, &renderer))
     {
@@ -184,6 +186,17 @@ int main()
         if (session.wants_exit())
             sys::quit();
 
+        // HDR: the console's scan-out follows what is playing (an HDR10 or HLG video on an HDR link); decided
+        // before the frame is built, so the shell knows whether the video goes through the HDR pass.
+        session.set_hdr_scanout(sx::hdr::update(session.hdr_wanted()));
+        {
+            static unsigned hdr_status_seen = 0;
+            if (sx::hdr::status_version() != hdr_status_seen)
+            {
+                hdr_status_seen = sx::hdr::status_version();
+                session.hdr_status_changed(sx::hdr::status());
+            }
+        }
         gfx::DrawList list;
         gfx::BackdropSpec backdrop;
         shell.draw(list, backdrop);
@@ -191,7 +204,19 @@ int main()
         renderer.begin();
         renderer.backdrop(backdrop);
         renderer.draw(list);
-        renderer.present(0, display.width(), display.height());
+        // In HDR the frame is drawn through the HDR pass; otherwise it is the normal SDR present.
+        if (!(sx::hdr::scanout_hdr() &&
+              sx::hdr::present(renderer, display.width(), display.height(), session.video_hdr ? session.video_texture_hdr : 0,
+                               session.hdr_rect)))
+        {
+            if (sx::hdr::scanout_hdr())
+            {
+                // the HDR pass could not draw: back to SDR for good
+                sx::hdr::update(false);
+                session.set_hdr_scanout(false);
+            }
+            renderer.present(0, display.width(), display.height());
+        }
         if (!display.swap())
         {
             sys::log("[SX] fatal: swap failed at frame %llu", static_cast<unsigned long long>(frames));

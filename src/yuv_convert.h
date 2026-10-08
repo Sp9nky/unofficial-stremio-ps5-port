@@ -24,7 +24,13 @@ struct YuvPicture {
 	int width = 0, height = 0;
 };
 
-enum class YuvColors { Bt601, Bt709, Hdr10 };
+enum class YuvColors { Bt601, Bt709, Hdr10, Hlg };  // Hlg: BT.2020 with the HLG curve, tone mapped like HDR10
+
+// The same for the HDR output (colors must be Hdr10 or Hlg): no tone mapping. The picture stays BT.2020 PQ (HLG
+// is converted to PQ, as BT.2100 describes) and each pixel is one 32-bit word, 10 bits per colour: R in bits 9-0,
+// G in 19-10, B in 29-20, 3 in 31-30. That is what the HDR scanout and a GL_RGB10_A2 texture read.
+void yuv_to_rgb10(const YuvPicture& pic, YuvColors colors, int scale, uint32_t* out, int out_w, int row_begin,
+                  int row_end);
 
 // Rows [row_begin, row_end) of the out_w x out_h RGBA output; out_w/out_h is
 // the picture's size (scale 1) or half of it (scale 2). Safe to call from

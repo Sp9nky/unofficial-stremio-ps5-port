@@ -75,9 +75,14 @@ public:
 	// A picture to show: tightly packed RGBA at its display size, valid until the
 	// next present().
 	struct Picture {
-		const uint8_t* rgba = nullptr;
+		const uint8_t* rgba = nullptr;  // hdr: 32-bit words, 10 bits per colour (yuv_convert.h), BT.2020 PQ
 		int w = 0, h = 0;
+		bool hdr = false;
 	};
+	// The screen is (or is no longer) in HDR: from then on, HDR10 and HLG pictures are made for the HDR output,
+	// without tone mapping. Other pictures stay SDR.
+	void set_hdr_output(bool on) { hdr_output_ = on; }
+	bool hdr_capable() const { return colors_ == YuvColors::Hdr10 || colors_ == YuvColors::Hlg; }
 	// UI thread, every frame: picks the frame due now. Returns it when it is a new
 	// one, nullptr when the one already shown is still the right one.
 	const Picture* present();
@@ -87,6 +92,9 @@ public:
 	// Every 30 s while playing: frame rate shown, drops, buffer, decoder (to the log).
 	void log_stats();
 	bool too_heavy() const { return too_heavy_; }
+	// How the colours are treated ("HDR10", "HLG", "Dolby Vision 5"...), and a warning when they cannot be right.
+	const std::string& colour_label() const { return colour_label_; }
+	const std::string& colour_warning() const { return colour_warning_; }
 
 private:
 	class PacketQueue {
@@ -117,7 +125,8 @@ private:
 		bool eof_ = false, abort_ = false;
 	};
 	struct Frame {
-		std::vector<uint8_t> pixels;  // RGBA
+		std::vector<uint8_t> pixels;  // RGBA, or (hdr) one 32-bit 10-bit word per pixel
+		bool hdr = false;
 		int w = 0, h = 0;
 		double pts = 0;
 		int serial = 0;
@@ -133,6 +142,8 @@ private:
 	void hw_to_rgba(const HwDecoder::Picture& pic, Frame& f);
 	bool fast_convert(const YuvPicture& pic, Frame& f);
 	YuvColors colors_ = YuvColors::Bt709;  // of the video being played
+	std::atomic<bool> hdr_output_{false};
+	std::string colour_label_, colour_warning_;
 	void audio_thread();
 	void fail(const std::string& msg);
 	bool open_stream_codec(int stream, AVCodecContext** out);

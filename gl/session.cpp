@@ -5,6 +5,7 @@
 #include "session.hpp"
 
 #include "http.h"
+#include "hdr_out.hpp"
 #include "netstream.h"
 #include "version.hpp"
 #include "torrent/engine.h"
@@ -33,6 +34,7 @@ enum SettingIndex
     kAudioLangs,
     kAutoplay,
     kUiSounds,
+    kHdr,
     kAddAddon,
     kUpdates,
     kReload,
@@ -147,6 +149,7 @@ void Session::load_prefs()
         prefs_.audio_langs = jstr(j, "audio_languages");
         prefs_.autoplay_next = jbool(j, "autoplay_next", prefs_.autoplay_next);
         prefs_.ui_sounds = jbool(j, "ui_sounds", prefs_.ui_sounds);
+        prefs_.hdr_output = jbool(j, "hdr_output", prefs_.hdr_output);
         prefs_.auth_key = jstr(j, "auth_key");
         prefs_.user_email = jstr(j, "user_email");
         const json &ex = jobj(j, "extra_addons");
@@ -168,6 +171,7 @@ json Session::prefs_json(const Prefs &p)
     j["audio_languages"] = p.audio_langs;
     j["autoplay_next"] = p.autoplay_next;
     j["ui_sounds"] = p.ui_sounds;
+    j["hdr_output"] = p.hdr_output;
     j["extra_addons"] = p.extra_addons;
     j["auth_key"] = p.auth_key;
     j["user_email"] = p.user_email;
@@ -451,6 +455,9 @@ void Session::refresh_settings()
     set(kAutoplay, Kind::toggle, "Play next episode automatically", "", "Start the next episode when one ends.",
         prefs_.autoplay_next);
     set(kUiSounds, Kind::toggle, "Interface sounds", "", "A soft sound when you move around, go back or switch page.", prefs_.ui_sounds);
+    set(kHdr, Kind::value, "HDR output", prefs_.hdr_output ? std::string(hdr::status()) : std::string("Off"),
+        "Send the picture to the TV as HDR (video as HDR10 or HLG, the interface at normal white). Tried when the app "
+        "starts; the line says what the console answered. Press Cross to turn it on or off.");
     set(kAddAddon, Kind::value, "Add addon by URL", "",
         prefs_.extra_addons.empty() ? "An addon's manifest URL. Remove added addons from the Addons page."
                                     : std::to_string(prefs_.extra_addons.size()) + " added here.");
@@ -578,6 +585,11 @@ void Session::settings_activate(int row)
         break;
     case kUpdates:
         update_check(true);
+        break;
+    case kHdr:
+        prefs_.hdr_output = !prefs_.hdr_output;
+        save_prefs();
+        cue(hui::audio::Cue::toggle);
         break;
     case kReload:
         addons_reload();

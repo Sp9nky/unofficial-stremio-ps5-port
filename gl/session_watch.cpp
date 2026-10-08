@@ -3,6 +3,8 @@
 // was watched.
 
 #include "session.hpp"
+
+#include "hdr_out.hpp"
 #include "stream_json.hpp"
 #include "system_status.hpp"
 
@@ -420,6 +422,7 @@ void Session::watch_start(const std::string &url, const std::vector<std::string>
     playing.sub_size = prefs_.sub_size == "sub-s" ? 0 : prefs_.sub_size == "sub-l" ? 2 : 1;
     w_started_ = false;
     w_heavy_warned_ = false;
+    w_colour_warned_ = false;
     w_menu_built_ = false;
     w_auto_sub_done_ = false;
     w_subs_.clear();
@@ -674,6 +677,11 @@ void Session::watch_update()
         w_last_save_ = now;
         watch_save_progress(false);
     }
+    if (!w_colour_warned_ && !player_.colour_warning().empty() && player_.state() == Player::State::Playing)
+    {
+        w_colour_warned_ = true;
+        say(player_.colour_warning(), 12.0, true);
+    }
     if (player_.too_heavy() && !w_heavy_warned_)
     {
         w_heavy_warned_ = true;
@@ -688,6 +696,16 @@ void Session::upload_video()
     const Player::Picture *pic = player_.present();
     if (!pic)
         return;
+    if (pic->hdr)
+    {
+        // A 10-bit PQ picture for the HDR output. If the screen is not in HDR (it was switched back a moment ago),
+        // it is skipped: the SDR pictures take over.
+        if (!hdr_scanout_)
+            return;
+        video_hdr = hdr::video_upload(&video_texture_hdr, &video_hdr_w, &video_hdr_h, pic->w, pic->h, pic->rgba);
+        return;
+    }
+    video_hdr = false;
     if (video_texture == 0 || pic->w != video_w || pic->h != video_h)
     {
         if (video_texture != 0)
@@ -703,6 +721,30 @@ void Session::upload_video()
     {
         renderer_->batch().update_texture(video_texture, pic->w, pic->h, pic->rgba);
     }
+}
+
+bool Session::hdr_wanted() const
+{
+    return prefs_.hdr_output; // HDR is tried at start and kept while it is on: the whole app goes through the HDR pass
+}
+
+void Session::hdr_status_changed(const std::string &text)
+{
+    refresh_settings();
+    if (text == "Starting" || text == "Off")
+        return;
+    const bool problem = text.rfind("On:", 0) != 0 && text.rfind("Switching", 0) != 0;
+    say("HDR: " + text, 8.0, problem);
+}
+
+void Session::set_hdr_scanout(bool on)
+{
+    if (on == hdr_scanout_)
+        return;
+    hdr_scanout_ = on;
+    player_.set_hdr_output(on); // from the next picture on, HDR video is made for the HDR output (or tone mapped again)
+    if (!on)
+        video_hdr = false;
 }
 
 void Session::watch_stop(bool ended)
@@ -732,6 +774,14 @@ void Session::watch_stop(bool ended)
         video_texture = 0;
         video_w = video_h = 0;
     }
+    if (video_texture_hdr != 0)
+    {
+        const GLuint old = video_texture_hdr;
+        glDeleteTextures(1, &old);
+        video_texture_hdr = 0;
+        video_hdr_w = video_hdr_h = 0;
+    }
+    video_hdr = false;
     // Back on the title's page: what was watched shows there.
     if (d_open_)
         for (std::size_t i = 0; i < detail.episodes.size() && i < d_season_videos_.size(); ++i)

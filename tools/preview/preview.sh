@@ -19,7 +19,7 @@ art="$build/art"
 
 sources=(
   "$root"/tools/preview/preview_main.cpp "$root"/tools/preview/sample.cpp "$root"/tools/preview/scripts_scene.cpp "$root"/tools/preview/worst_cases.cpp
-  "$root"/ui/*.cpp "$root"/gl/art.cpp "$root"/gl/ime.cpp "$root"/gl/ui_sound.cpp "$root"/gl/system_status.cpp "$root"/gl/session*.cpp "$root"/src/player.cpp "$root"/src/netstream.cpp "$root"/src/hwdec_ps5.cpp "$root"/src/yuv_convert.cpp "$root"/src/subtitles.cpp "$root"/src/pcm_out.cpp "$root"/src/torrent/*.cpp "$root"/src/bidi.cpp "$root"/src/stremio.cpp "$root"/src/http.cpp "$root"/src/util.cpp "$root"/src/tasks.cpp
+  "$root"/ui/*.cpp "$root"/gl/art.cpp "$root"/gl/ime.cpp "$root"/gl/ui_sound.cpp "$root"/gl/system_status.cpp "$root"/gl/hdr_out.cpp "$root"/gl/session*.cpp "$root"/src/player.cpp "$root"/src/netstream.cpp "$root"/src/hwdec_ps5.cpp "$root"/src/yuv_convert.cpp "$root"/src/subtitles.cpp "$root"/src/pcm_out.cpp "$root"/src/torrent/*.cpp "$root"/src/bidi.cpp "$root"/src/stremio.cpp "$root"/src/http.cpp "$root"/src/util.cpp "$root"/src/tasks.cpp
   "$hui"/src/gfx/*.cpp "$hui"/src/core/save_file.cpp "$hui"/src/ui/glyphs.cpp
   "$root"/tools/preview/system_host.cpp
 )

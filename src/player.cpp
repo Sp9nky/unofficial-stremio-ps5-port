@@ -4,6 +4,8 @@ extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 #include <libavutil/channel_layout.h>
+#include <libavutil/dovi_meta.h>
+#include <libavutil/pixdesc.h>
 #include <libavutil/opt.h>
 #include <libavutil/time.h>
 #include <libswresample/swresample.h>
@@ -355,17 +357,50 @@ void Player::demux_run() {
 		return;
 	}
 
-	// Colours, from the stream's tags: HDR10 (PQ) gets tone mapped; SD
-	// pictures use BT.601, everything else BT.709.
+	// Colours, from the stream's tags: HDR10 (PQ) and HLG get tone mapped; SD pictures use BT.601, everything
+	// else BT.709. Dolby Vision is read from its configuration: profile 8.1/8.4 carry an HDR10/HLG picture
+	// (shown as that); profile 5 has a picture in a colour space of its own (IPT) that is not shown right.
+	colour_label_.clear();
+	colour_warning_.clear();
 	if (vs >= 0) {
 		const AVCodecParameters* p = fmt_->streams[vs]->codecpar;
 		bool sd_space = p->color_space == AVCOL_SPC_BT470BG || p->color_space == AVCOL_SPC_SMPTE170M;
-		colors_ = p->color_trc == AVCOL_TRC_SMPTE2084 ? YuvColors::Hdr10
-		          : (sd_space || (p->color_space == AVCOL_SPC_UNSPECIFIED && p->height < 720)) ? YuvColors::Bt601
-		                                                                                       : YuvColors::Bt709;
-		dlog("player: colours %s (transfer %d, matrix %d, primaries %d)",
-		     colors_ == YuvColors::Hdr10 ? "HDR10, tone mapped" : colors_ == YuvColors::Bt601 ? "BT.601" : "BT.709",
-		     int(p->color_trc), int(p->color_space), int(p->color_primaries));
+		const AVPixFmtDescriptor* pd = av_pix_fmt_desc_get(AVPixelFormat(p->format));
+		const bool deep = pd && pd->comp[0].depth >= 10;
+		const bool wide_gamut = p->color_primaries == AVCOL_PRI_BT2020 || p->color_space == AVCOL_SPC_BT2020_NCL;
+		int dv_profile = -1, dv_compat = -1;
+		if (const AVPacketSideData* sd =
+		        av_packet_side_data_get(p->coded_side_data, p->nb_coded_side_data, AV_PKT_DATA_DOVI_CONF)) {
+			const auto* d = reinterpret_cast<const AVDOVIDecoderConfigurationRecord*>(sd->data);
+			dv_profile = d->dv_profile;
+			dv_compat = d->dv_bl_signal_compatibility_id;
+		}
+		const bool has_mastering =
+		    av_packet_side_data_get(p->coded_side_data, p->nb_coded_side_data, AV_PKT_DATA_MASTERING_DISPLAY_METADATA) != nullptr;
+		AVColorTransferCharacteristic trc = p->color_trc;
+		if (dv_profile == 8 && dv_compat == 1) trc = AVCOL_TRC_SMPTE2084;          // an HDR10 picture inside
+		else if (dv_profile == 8 && dv_compat == 4) trc = AVCOL_TRC_ARIB_STD_B67;  // an HLG picture inside
+		const bool untagged_hdr = trc == AVCOL_TRC_UNSPECIFIED && deep && (wide_gamut || has_mastering);
+		if (trc == AVCOL_TRC_SMPTE2084 || untagged_hdr) {
+			colors_ = YuvColors::Hdr10;
+			colour_label_ = dv_profile >= 0 ? "HDR10 (Dolby Vision " + std::to_string(dv_profile) + ")" : untagged_hdr ? "HDR10 (untagged)" : "HDR10";
+		} else if (trc == AVCOL_TRC_ARIB_STD_B67) {
+			colors_ = YuvColors::Hlg;
+			colour_label_ = "HLG";
+		} else {
+			colors_ = (sd_space || (p->color_space == AVCOL_SPC_UNSPECIFIED && p->height < 720)) ? YuvColors::Bt601
+			                                                                                     : YuvColors::Bt709;
+			if (dv_profile >= 0) colour_label_ = "Dolby Vision " + std::to_string(dv_profile);
+		}
+		if (dv_profile == 5 || (dv_profile == 7 && dv_compat == 0)) {
+			colour_label_ = "Dolby Vision " + std::to_string(dv_profile);
+			colour_warning_ =
+			    "This stream is Dolby Vision profile " + std::to_string(dv_profile) +
+			    " without an HDR10 version: its colours can't be shown right. Pick another stream (HDR10 or SDR).";
+		}
+		dlog("player: colours %s (transfer %d, matrix %d, primaries %d, %d-bit, Dolby Vision profile %d compat %d, mastering %d)",
+		     colour_label_.empty() ? (colors_ == YuvColors::Bt601 ? "BT.601" : "BT.709") : colour_label_.c_str(), int(p->color_trc),
+		     int(p->color_space), int(p->color_primaries), pd ? pd->comp[0].depth : 0, dv_profile, dv_compat, has_mastering ? 1 : 0);
 	}
 	// Video: the hardware decoder when it takes the stream; FFmpeg's software
 	// decoder otherwise (and if the hardware one fails later).
@@ -740,6 +775,7 @@ bool Player::emit_frame(double pts, int serial, const std::function<void(Frame&)
 	f.w = dw & ~1;
 	f.h = dh & ~1;
 	f.pixels.resize(size_t(f.w) * f.h * 4);
+	f.hdr = false;  // fill() sets it when it makes an HDR picture
 	fill(f);
 	f.pts = pts;
 	f.serial = serial;
@@ -817,6 +853,12 @@ bool Player::fast_convert(const YuvPicture& pic, Frame& f) {
 	                                                                      : 0;
 	if (!scale) return false;
 	YuvColors colors = colors_;
+	if (hdr_output_ && hdr_capable()) {
+		f.hdr = true;
+		uint32_t* words = reinterpret_cast<uint32_t*>(f.pixels.data());
+		RowPool::get().run(f.h, [&](int a, int b) { yuv_to_rgb10(pic, colors, scale, words, f.w, a, b); });
+		return true;
+	}
 	RowPool::get().run(
 	    f.h, [&](int a, int b) { yuv_to_rgba(pic, colors, scale, f.pixels.data(), f.w, a, b); });
 	return true;
@@ -1213,6 +1255,7 @@ const Player::Picture* Player::present() {
 			pic_.rgba = current_.pixels.data();
 			pic_.w = current_.w;
 			pic_.h = current_.h;
+			pic_.hdr = current_.hdr;
 			out = &pic_;
 			fq_cv_.notify_all();
 		}
@@ -1298,7 +1341,7 @@ std::string Player::codec_summary() const {
 		std::string c = avcodec_get_name(p->codec_id);
 		for (auto& ch : c) ch = char(toupper((unsigned char)ch));
 		parts.push_back(c + " " + std::to_string(p->width) + "x" + std::to_string(p->height) +
-		                (hw_active_ ? " (hardware)" : " (software)"));
+		                (hw_active_ ? " (hardware)" : " (software)") + (colour_label_.empty() ? "" : " · " + colour_label_));
 	}
 	if (as >= 0) parts.push_back(track_label(as));
 	return join(parts, " · ");
@@ -1329,7 +1372,7 @@ void Player::log_stats() {
 
 std::string Player::stats() {
 	if (state_ != State::Playing) return "";
-	char buf[256];
+	char buf[384];
 	snprintf(buf, sizeof(buf), "%s · %.3g fps · buffered %.1fs · dropped %d of %d", codec_summary().c_str(), fps_,
 	         std::max(vq_.duration(), aq_.duration()), dropped_.load(), decoded_.load());
 	return buf;

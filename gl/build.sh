@@ -110,6 +110,10 @@ if title != "PPSA77711":  # a test build beside the real one: its own ids
     p["conceptId"] = title[4:]
     p["contentId"] = "UP9000-%s_00-STREMIOUITEST%s" % (title, title[-3:])  # 16 characters after the underscore
 p["localizedParameters"]["en-US"]["titleName"] = sys.argv[4]
+# HDR-capable title (the flags ProsperoLight and PS5MC declare): without them the console refuses the HDR scan-out
+# format. With them, and the console's HDR on "When Supported", the TV stays in HDR for the session and the console
+# maps SDR content (the interface) into it itself.
+p["attribute"] = int(p.get("attribute", 0)) | 0x62000000
 json.dump(p, open(sys.argv[2], "w"), indent=2)
 PY
 cp "$ROOT/app/sce_sys/icon0.png" "$ROOT/app/sce_sys/pic0.dds" "$ROOT/app/sce_sys/pic1.dds" "$APP/sce_sys/"

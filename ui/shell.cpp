@@ -685,8 +685,18 @@ void Shell::draw(hui::gfx::DrawList &list, hui::gfx::BackdropSpec &backdrop) con
         else
         {
             backdrop.mode = hui::gfx::BackdropMode::none;
-            list.rounded_rect({0, 0, theme::kScreenW, theme::kScreenH}, 0, hui::gfx::Color::rgb(0x000000));
-            if (s_.video_texture != 0)
+            if (s_.video_hdr && s_.video_texture_hdr != 0)
+            {
+                // The HDR pass draws the video (and the black around it); only the interface goes in the list.
+                const float w = static_cast<float>(s_.video_hdr_w), h = static_cast<float>(s_.video_hdr_h);
+                s_.hdr_rect = {(theme::kScreenW - w) * 0.5f, (theme::kScreenH - h) * 0.5f, w, h};
+            }
+            else
+            {
+                s_.hdr_rect = {};
+                list.rounded_rect({0, 0, theme::kScreenW, theme::kScreenH}, 0, hui::gfx::Color::rgb(0x000000));
+            }
+            if (!(s_.video_hdr && s_.video_texture_hdr != 0) && s_.video_texture != 0)
             {
                 const float w = static_cast<float>(s_.video_w), h = static_cast<float>(s_.video_h);
                 list.image(s_.video_texture, {(theme::kScreenW - w) * 0.5f, (theme::kScreenH - h) * 0.5f, w, h},
