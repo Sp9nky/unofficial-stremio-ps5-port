@@ -62,6 +62,14 @@ The titles and artwork in these pictures are invented (made by `tools/preview`).
   not have to copy files by hand any more. It needs a payload loader on port 9021 (the one
   that runs your homebrew) and the image in `/data/homebrew`. The old image is kept next to the
   new one as `PPSA77711.ffpfsc.old`, and the steps are logged to `/data/stremio-update.log`.
+- **Real HDR.** On an HDR TV, HDR10 and HLG video now goes out as real HDR (not tone mapped
+  to SDR), and the interface is drawn at normal white level on top. The app asks the console for
+  HDR when it starts and tells you the answer on screen; **Settings, HDR output** shows it and
+  turns it off. It needs the TV and the console's HDR setting ("On When Supported") to allow
+  HDR; if you update from an older version, delete the old image, wait a few seconds, then copy
+  the new one so the console reads the app's HDR flags. Dolby Vision profile 8 plays its HDR10
+  picture; profile 5 files (no HDR10 picture inside) are flagged on screen and can show wrong
+  colours.
 - **Smoother dialogs.** Dialogs open and close with one soft motion, the cursor glides between
   choices, and the update bar moves smoothly.
 - **Shaders changed to avoid a console compiler bug** that could stop the app at start-up
