@@ -1,6 +1,14 @@
 # Unofficial Stremio PS5 Port
 
 [![Support me on Ko-fi](https://img.shields.io/badge/Ko--fi-Support_this_project-FF5E5B?style=for-the-badge&logo=ko-fi&logoColor=white)](https://ko-fi.com/sp9nky)
+[![Join the beta on Discord](https://img.shields.io/badge/Discord-Join_the_beta-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/fJzFmvFqVf)
+
+> [!IMPORTANT]
+> **We need beta testers!** The next version is being tested right now, and I need
+> people with a jailbroken PS5 to try the test builds on different consoles, TVs,
+> networks and streams, and tell me what works and what doesn't. Join the beta
+> Discord server to get the test builds and report what you find:
+> **https://discord.gg/fJzFmvFqVf**
 
 > [!IMPORTANT]
 > **Version 1.0 is a full redesign of the app.** Every screen was rebuilt from
