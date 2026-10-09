@@ -111,7 +111,7 @@ PY
 cp "$ROOT/app/sce_sys/icon0.png" "$ROOT/app/sce_sys/pic0.dds" "$ROOT/app/sce_sys/pic1.dds" "$APP/sce_sys/"
 bash "$BP/tools/validate-assets.sh" "$APP/sce_sys" >/dev/null
 mkdir -p "$APP/fonts" "$APP/hui-fonts" "$APP/icons"
-cp "$ROOT"/app/fonts/{Inter-Regular,Inter-SemiBold,Montserrat-Medium,NotoSans-Regular,NotoSans-Bold,NotoNaskhArabicUI-Regular,NotoNaskhArabicUI-Bold}.ttf "$APP/fonts/"
+cp "$ROOT"/app/fonts/{Inter-Regular,Inter-SemiBold,Montserrat-Medium,NotoSans-Regular,NotoSans-Bold,NotoSansThai-Regular,NotoSansThai-Bold,NotoNaskhArabicUI-Regular,NotoNaskhArabicUI-Bold}.ttf "$APP/fonts/"
 # the fonts' license texts travel with them
 cp "$ROOT"/app/fonts/*.txt "$APP/fonts/" 2>/dev/null || true
 cp "$HUI"/assets/fonts/*.huifont "$HUI"/assets/fonts/*LICENSE*.txt "$APP/hui-fonts/"
