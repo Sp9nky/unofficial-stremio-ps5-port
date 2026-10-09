@@ -12,6 +12,13 @@
 #include <unordered_set>
 #include <vector>
 
+// MODIFIED for Stremio for PS5: forward declaration at global scope (the
+// tables live in the app's ui/thai_anchors.hpp).
+namespace thai_anchors
+{
+struct ThaiAnchorSet;
+} // namespace thai_anchors
+
 namespace hui::gfx
 {
 
@@ -35,6 +42,14 @@ class GlyphSource
     virtual ~GlyphSource() = default;
     // False if no face has the character.
     virtual bool glyph(std::uint32_t codepoint, GlyphBitmap &out) = 0;
+    // MODIFIED for Stremio for PS5: rasterize a glyph by index in the Thai
+    // face (for .small/.narrow variant substitution). Default: unsupported.
+    virtual bool glyph_by_index(int glyph_index, GlyphBitmap &out)
+    {
+        (void)glyph_index;
+        (void)out;
+        return false;
+    }
 };
 
 // One positioned glyph quad in output pixels, with its atlas UV rectangle.
@@ -125,6 +140,15 @@ class Font
     // The atlas rows that changed since the last call, for updating the GPU
     // copy. False when nothing did.
     bool take_dirty(int *first_row, int *last_row) const;
+    // MODIFIED for Stremio for PS5: Thai mark positioning tables (baked GPOS
+    // anchors + HarfBuzz measurements). Null disables anchor positioning.
+    void set_thai_anchors(const thai_anchors::ThaiAnchorSet *anchors)
+    {
+        thai_anchors_ = anchors;
+    }
+    // Registers a Thai variant glyph (e.g. .small/.narrow) rasterized by
+    // glyph index under a private-use codepoint, so layout() can find() it.
+    bool add_thai_variant(std::uint32_t codepoint, int glyph_index) const;
 
   private:
     const font_format::Glyph *find(std::uint32_t codepoint) const;
@@ -140,6 +164,8 @@ class Font
     // Run-time glyphs.
     GlyphSource *source_ = nullptr;
     std::string (*transform_)(std::string_view) = nullptr;
+    // MODIFIED for Stremio for PS5: Thai positioning tables (null = off).
+    const thai_anchors::ThaiAnchorSet *thai_anchors_ = nullptr;
     mutable std::unordered_set<std::uint32_t> missing_;
     mutable int pen_x_ = 1;
     mutable int pen_y_ = 1;

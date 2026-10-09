@@ -32,6 +32,7 @@ std::string rml_escape(const std::string& s);
 bool is_valid_utf8(const std::string& s);
 std::string cp1253_to_utf8(const std::string& s);   // Greek Windows code page
 std::string cp1252_to_utf8(const std::string& s);   // Western Windows code page
+std::string cp874_to_utf8(const std::string& s);    // Thai Windows code page (TIS-620)
 std::string to_utf8(const std::string& s, const std::string& lang_hint);
 
 // Time
