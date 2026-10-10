@@ -171,8 +171,17 @@ bool Font::add_glyph(std::uint32_t codepoint) const
         }
         if (pen_y_ + bitmap.h + 1 > height)
         {
-            missing_.insert(codepoint); // the atlas is full
-            return false;
+            // MODIFIED for Stremio for PS5: the atlas is full (a long Japanese film uses thousands of kanji):
+            // start it over; what is on screen is drawn again, glyph by glyph, on the next frames.
+            glyphs_.clear();
+            pen_x_ = pen_y_ = 1;
+            shelf_ = 0;
+            dirty_first_ = dirty_last_ = -1;
+            if (bitmap.h + 2 > height || bitmap.w + 2 > width)
+            {
+                missing_.insert(codepoint);
+                return false;
+            }
         }
         for (int row = 0; row < bitmap.h; ++row)
             std::memcpy(&atlas_[static_cast<std::size_t>((pen_y_ + row) * width + pen_x_)],

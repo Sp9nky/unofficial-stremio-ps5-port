@@ -1,0 +1,8 @@
+Noto Sans JP, SC, TC, KR (the CJK ones are "Source Han Sans" by Adobe, Copyright 2014-2021 Adobe),
+Noto Sans Hebrew and Noto Sans Thai (Copyright 2022 The Noto Project Authors).
+Licensed under the SIL Open Font License, Version 1.1 (see OFL.txt next to this file).
+
+The files here are subsets made for the subtitles: the variable fonts were fixed at one weight
+(Regular/Bold for Hebrew and Thai, Medium for CJK) and cut down to the characters of the common
+legacy character sets (JIS X 0208, GB 2312, Big5, KS X 1001 / all Hangul syllables) without layout
+tables. They are modified versions and keep the Reserved Font Name rules of the license.

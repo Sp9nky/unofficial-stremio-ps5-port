@@ -81,6 +81,17 @@ class Board
     hui::ui::SpringRect ring_;                           // the white ring around the focused card
     hui::tween::Spring focus_on_;                        // 1 while the content holds the focus
 
+    // The wallpaper layers, oldest first. A wallpaper joins when its picture is on the GPU and fades in from then (not
+    // from when the cursor moved), over what was there; the ones under it go when it is whole. A picture that is
+    // still on its way leaves the old wallpaper up, so a move never shows a gap and then a pop.
+    struct WallLayer
+    {
+        std::uint32_t id = 0; // 0: no wallpaper (the dark ground)
+        float alpha = 0.0f;
+    };
+    std::vector<WallLayer> walls_;
+    float wall_missing_ = 0.0f; // how long the focused title has had no picture to show
+
     Key shown_;            // what the hero shows
     Key before_;           // what it showed before, fading out
     hui::tween::Timer swap_; // the crossfade between the two

@@ -224,11 +224,34 @@ std::vector<Stream> parse_streams(const json& j, const std::string& addon_name) 
 		Stream st;
 		st.addon = addon_name;
 		st.name = jstr(s, "name", addon_name);
+		st.title = jstr(s, "title");
 		st.description = jstr(s, "description", jstr(s, "title"));
+		{
+			const json& cr = jobj(s, "clientResolve");
+			if (cr.is_object()) {
+				ClientResolve& c = st.client_resolve;
+				c.present = true;
+				c.type = jstr(cr, "type");
+				c.service = jstr(cr, "service");
+				c.info_hash = lower(jstr(cr, "infoHash"));
+				c.magnet_uri = jstr(cr, "magnetUri");
+				c.torrent_name = jstr(cr, "torrentName");
+				c.filename = jstr(cr, "filename");
+				if (cr.contains("fileIdx") && cr["fileIdx"].is_number()) {
+					c.file_idx = int(jnum(cr, "fileIdx", -1));
+					c.has_file_idx = true;
+				}
+				c.sources = str_array(jobj(cr, "sources"));
+				if (cr.contains("season") && cr["season"].is_number()) c.season = int(jnum(cr, "season"));
+				if (cr.contains("episode") && cr["episode"].is_number()) c.episode = int(jnum(cr, "episode"));
+				c.is_cached = jbool(cr, "isCached");
+			}
+		}
 		st.url = jstr(s, "url");
 		st.info_hash = lower(jstr(s, "infoHash"));
 		st.file_idx = int(jnum(s, "fileIdx", -1));
 		st.sources = str_array(jobj(s, "sources"));
+		st.file_must_include = str_array(jobj(s, "fileMustInclude"));
 		const json& bh = jobj(s, "behaviorHints");
 		st.filename = jstr(bh, "filename");
 		st.binge_group = jstr(bh, "bingeGroup");
@@ -318,6 +341,11 @@ ApiResult api_library_get(const std::string& auth_key) {
 
 ApiResult api_library_put(const std::string& auth_key, const json& items) {
 	return api_call("datastorePut", json{{"authKey", auth_key}, {"collection", "libraryItem"}, {"changes", items}});
+}
+
+bool api_send_watched(const std::string& auth_key, const std::string& media_id, const std::string& media_type) {
+	const json body{{"authToken", auth_key}, {"mediaId", media_id}, {"mediaType", media_type}, {"status", "watched"}};
+	return http_post_json("https://likes.stremio.com/api/send", body.dump(), 15).ok();
 }
 
 ApiResult api_logout(const std::string& auth_key) {

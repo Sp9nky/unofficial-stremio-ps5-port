@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <cstdlib>
 
-#include "bidi.h"
 #include "util.h"
 
 // "00:01:02,345" / "01:02.345" / "0:01:02.34" -> seconds; -1 if not a time.
@@ -29,7 +28,39 @@ static double parse_timestamp(const std::string& s) {
 	return t;
 }
 
+// An HTML entity at in[i] ("&amp;", "&nbsp;", "&#233;", "&#xE9;", "&rlm;"): its character, and the entity's length.
+static bool html_entity(const std::string& in, size_t i, std::string& text, size_t& len) {
+	size_t semi = in.find(';', i);
+	if (semi == std::string::npos || semi - i > 9 || semi - i < 3) return false;
+	std::string name = in.substr(i + 1, semi - i - 1);
+	len = semi - i + 1;
+	uint32_t cp = 0;
+	if (name[0] == '#') {
+		bool hex = name.size() > 1 && (name[1] == 'x' || name[1] == 'X');
+		const char* digits = name.c_str() + (hex ? 2 : 1);
+		char* end = nullptr;
+		long v = strtol(digits, &end, hex ? 16 : 10);
+		if (end == digits || *end || v <= 0 || v > 0x10ffff) return false;
+		cp = uint32_t(v);
+	} else if (name == "amp") cp = '&';
+	else if (name == "lt") cp = '<';
+	else if (name == "gt") cp = '>';
+	else if (name == "quot") cp = '"';
+	else if (name == "apos") cp = '\'';
+	else if (name == "nbsp") cp = ' ';
+	else if (name == "lrm") cp = 0x200e;
+	else if (name == "rlm") cp = 0x200f;
+	else return false;
+	text.clear();
+	if (cp < 0x80) text += char(cp);
+	else if (cp < 0x800) text += char(0xc0 | (cp >> 6)), text += char(0x80 | (cp & 0x3f));
+	else if (cp < 0x10000) text += char(0xe0 | (cp >> 12)), text += char(0x80 | ((cp >> 6) & 0x3f)), text += char(0x80 | (cp & 0x3f));
+	else text += char(0xf0 | (cp >> 18)), text += char(0x80 | ((cp >> 12) & 0x3f)), text += char(0x80 | ((cp >> 6) & 0x3f)), text += char(0x80 | (cp & 0x3f));
+	return true;
+}
+
 std::string subtitle_text_to_rml(const std::string& in) {
+	bool drawing = false;  // ASS vector drawing (the p1 ... p0 override tags): not text
 	std::string out;
 	bool italic = false, bold = false;
 	size_t i = 0;
@@ -40,11 +71,17 @@ std::string subtitle_text_to_rml(const std::string& in) {
 			size_t end = in.find('}', i);
 			if (end == std::string::npos) break;
 			std::string tags = in.substr(i, end - i);
+			if (tags.find("\\p0") != std::string::npos) drawing = false;
+			else if (tags.find("\\p1") != std::string::npos) drawing = true;
 			if (tags.find("\\i1") != std::string::npos && !italic) out += "<em>", italic = true;
 			if (tags.find("\\i0") != std::string::npos && italic) out += "</em>", italic = false;
 			if (tags.find("\\b1") != std::string::npos && !bold) out += "<strong>", bold = true;
 			if (tags.find("\\b0") != std::string::npos && bold) out += "</strong>", bold = false;
 			i = end + 1;
+			continue;
+		}
+		if (drawing) {
+			i++;
 			continue;
 		}
 		if (c == '{' && i + 1 < in.size() && in[i + 1] == 'y' && in.find('}', i) != std::string::npos) {
@@ -87,6 +124,22 @@ std::string subtitle_text_to_rml(const std::string& in) {
 			i++;
 			continue;
 		}
+		if (c == '&') {
+			std::string decoded;
+			size_t len = 0;
+			if (html_entity(in, i, decoded, len)) {
+				for (char d : decoded) {
+					switch (d) {
+					case '&': out += "&amp;"; break;
+					case '<': out += "&lt;"; break;
+					case '>': out += "&gt;"; break;
+					default: out += d;
+					}
+				}
+				i += len;
+				continue;
+			}
+		}
 		switch (c) {
 		case '&': out += "&amp;"; break;
 		case '<': out += "&lt;"; break;
@@ -102,8 +155,7 @@ std::string subtitle_text_to_rml(const std::string& in) {
 	// Collapse leading/trailing breaks.
 	while (starts_with(out, "<br/>")) out = out.substr(5);
 	while (ends_with(out, "<br/>")) out = out.substr(0, out.size() - 5);
-	// Arabic / Hebrew lines into display order, letters joined (bidi.h).
-	return bidi_visual_rml(out);
+	return out; // right-to-left lines are put in display order when drawn (bidi.h)
 }
 
 static std::vector<std::string> lines_of(const std::string& text) {

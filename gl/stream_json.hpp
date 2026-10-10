@@ -18,6 +18,22 @@ inline json stream_to_json(const ::Stream &s)
     j["info_hash"] = s.info_hash;
     j["file_idx"] = s.file_idx;
     j["sources"] = s.sources;
+    j["title"] = s.title;
+    if (s.client_resolve.present)
+    {
+        const ::ClientResolve &c = s.client_resolve;
+        json cr{{"type", c.type},   {"service", c.service},         {"infoHash", c.info_hash}, {"magnetUri", c.magnet_uri},
+                {"torrentName", c.torrent_name}, {"filename", c.filename}, {"sources", c.sources},
+                {"isCached", c.is_cached}};
+        if (c.has_file_idx)
+            cr["fileIdx"] = c.file_idx;
+        if (c.season >= 0)
+            cr["season"] = c.season;
+        if (c.episode >= 0)
+            cr["episode"] = c.episode;
+        j["client_resolve"] = cr;
+    }
+    j["file_must_include"] = s.file_must_include;
     j["filename"] = s.filename;
     j["binge_group"] = s.binge_group;
     j["not_web_ready"] = s.not_web_ready;
@@ -41,6 +57,34 @@ inline ::Stream stream_from_json(const json &j)
                     out.push_back(v.get<std::string>());
     };
     strings("sources", s.sources);
+    s.title = jstr(j, "title");
+    if (j.contains("client_resolve") && j["client_resolve"].is_object())
+    {
+        const json &cr = j["client_resolve"];
+        ::ClientResolve &c = s.client_resolve;
+        c.present = true;
+        c.type = jstr(cr, "type");
+        c.service = jstr(cr, "service");
+        c.info_hash = jstr(cr, "infoHash");
+        c.magnet_uri = jstr(cr, "magnetUri");
+        c.torrent_name = jstr(cr, "torrentName");
+        c.filename = jstr(cr, "filename");
+        if (cr.contains("fileIdx") && cr["fileIdx"].is_number())
+        {
+            c.file_idx = static_cast<int>(jnum(cr, "fileIdx", -1));
+            c.has_file_idx = true;
+        }
+        if (cr.contains("sources") && cr["sources"].is_array())
+            for (const auto &v : cr["sources"])
+                if (v.is_string())
+                    c.sources.push_back(v.get<std::string>());
+        if (cr.contains("season") && cr["season"].is_number())
+            c.season = static_cast<int>(jnum(cr, "season"));
+        if (cr.contains("episode") && cr["episode"].is_number())
+            c.episode = static_cast<int>(jnum(cr, "episode"));
+        c.is_cached = jbool(cr, "isCached");
+    }
+    strings("file_must_include", s.file_must_include);
     strings("request_headers", s.request_headers);
     s.filename = jstr(j, "filename");
     s.binge_group = jstr(j, "binge_group");

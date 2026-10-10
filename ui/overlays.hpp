@@ -47,8 +47,22 @@ struct SignInState
     std::string link;       // "stremio.com/link"
     std::string code;       // "A7KP"
     std::string status;     // "Waiting for you to sign in"
+    std::string title = "Sign in to Stremio";
+    bool logo = true;       // Stremio's mark beside the title; Torbox's sign-in has none
+    bool failed = false;    // no code could be got (the sign-in screen tries again on its own)
 };
 void draw_sign_in(hui::gfx::DrawList &list, const Env &env, const SignInState &state, float clock, float t);
+
+// The sign-in screen before the Board when no one is signed in: the posters that came during the boot animation
+// drift behind it. wall: the posters (GL textures) and how far each has faded in; t (0..1) brings the screen in and
+// takes it away.
+struct WallTile
+{
+    std::uint32_t id = 0;
+    float alpha = 0.0f;
+};
+void draw_sign_in_screen(hui::gfx::DrawList &list, const Env &env, const SignInState &state,
+                         const std::vector<WallTile> &wall, float clock, float t);
 
 struct ToastState
 {

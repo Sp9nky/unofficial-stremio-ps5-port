@@ -146,7 +146,9 @@ Stream view_of(const ::Stream &st)
 {
     Stream v;
     v.resolution = resolution_of(st);
-    v.name = st.addon.empty() ? first_line(st.name) : st.addon;
+    // The stream's own name, as Stremio lists it: "[RD+] Torrentio", "[RD download] Torrentio" (a debrid addon's mark of what
+    // is cached). The addon's name when the stream has none.
+    v.name = !first_line(st.name).empty() ? first_line(st.name) : st.addon;
     // The release name: the file's own, else the first line of the description.
     v.detail = !st.filename.empty() ? st.filename : first_line(st.description);
     if (v.detail.empty())
@@ -188,7 +190,27 @@ Stream stream_view(const ::Stream &st)
 
 bool Session::watched(const std::string &video_id) const
 {
-    return watched_.count(video_id) > 0;
+    return watched_.count(video_id) > 0 || account_watched(video_id);
+}
+
+// What the account says (the library item's "watched" field, stremio-core's bit field over the series' videos).
+bool Session::account_watched(const std::string &video_id) const
+{
+    if (!signed_in() || !d_meta_loaded_ || d_meta_.videos.empty())
+        return false;
+    const auto it = library_.find(d_item_.id);
+    if (it == library_.end())
+        return false;
+    const json &w = jobj(jobj(it->second, "state"), "watched");
+    if (!w.is_string())
+        return false;
+    const std::string field = w.get<std::string>();
+    if (d_bits_src_ != field || d_bits_.ids.size() != d_meta_.videos.size())
+    {
+        d_bits_src_ = field;
+        d_bits_ = watched::construct(field, watched::sorted_ids(d_meta_.videos));
+    }
+    return d_bits_.get_video(video_id);
 }
 
 void Session::detail_toggle_watched(int index)
@@ -207,6 +229,8 @@ void Session::detail_toggle_watched(int index)
         say("Marked as watched");
     }
     save_progress();
+    // The account too (core's MarkVideoAsWatched): the bit in the library item's "watched" field.
+    library_mark_video(id, watched_.count(id) > 0);
     detail.episodes[static_cast<std::size_t>(index)].watched = watched(id);
     changed_ |= kDetail;
 }
@@ -565,22 +589,33 @@ void Session::detail_load_streams(const std::string &video_id, const std::string
             std::vector<::Stream> streams;
             std::string error;
         };
+        const debrid::Credentials keys = debrid_creds();
         bg<Res>(
-            [name, url]() {
+            [name, url, keys]() {
                 Res r;
                 json j;
                 if (fetch_json(url, j, r.error, 30))
+                {
                     r.streams = parse_streams(j, name);
+                    if (keys.any())
+                        debrid::annotate(r.streams, keys); // Torbox: which torrents it has cached
+                }
                 return r;
             },
-            [this, gen, name](Res &r) {
+            [this, gen, name, keys](Res &r) {
                 if (gen != d_gen_)
                     return;
                 ++d_answered_;
                 if (!r.error.empty())
                     dlog("streams from %s: %s", name.c_str(), r.error.c_str());
                 for (auto &st : r.streams)
+                {
+                    // A stream only a debrid service could play is listed with a key for it; torrents Torbox does not
+                    // have are left out when Torbox resolves torrents (Nuvio's shouldListStream).
+                    if (!debrid::listed(st, keys))
+                        continue;
                     d_found_.push_back(st);
+                }
                 detail_refresh_streams();
             });
     }

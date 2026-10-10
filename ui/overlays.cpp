@@ -416,9 +416,9 @@ void draw_sign_in(hui::gfx::DrawList &list, const Env &env, const SignInState &s
     list.push_opacity(t);
     list.push_transform(0.96f + 0.04f * t, r.cx(), r.cy(), 0.0f, (1.0f - t) * 12.0f);
     panel(list, r, 40.0f, 0.98f);
-    if (env.icons.logo != 0)
+    if (s.logo && env.icons.logo != 0)
         list.image(env.icons.logo, {r.x + 64.0f, r.y + 52.0f, 76.0f, 76.0f}, kFullUv, Color::rgb(0xffffff));
-    text(list, env.fonts.display, "Sign in to Stremio", r.x + 164.0f, r.y + 112.0f, 46.0f, theme::ink, Align::left, -0.8f);
+    text(list, env.fonts.display, s.title, r.x + (s.logo ? 164.0f : 64.0f), r.y + 112.0f, 46.0f, theme::ink, Align::left, -0.8f);
 
     // The QR code, on white so any phone can read it.
     const Rect qr{r.x + 64.0f, r.y + 190.0f, 440.0f, 440.0f};
@@ -440,7 +440,9 @@ void draw_sign_in(hui::gfx::DrawList &list, const Env &env, const SignInState &s
     step(3, "and enter this code", r.y + 428.0f);
     const Rect code{x + 58.0f, r.y + 462.0f, 520.0f, 124.0f};
     list.rounded_rect(code, 26.0f, theme::surface);
-    text(list, env.fonts.display, s.code, code.cx(), code.cy() + 34.0f, 92.0f, theme::ink, Align::center, 14.0f);
+    // A longer code (Torbox's) is drawn smaller, to stay inside its box.
+    const float code_size = std::min(92.0f, 92.0f * (code.w - 48.0f) / std::max(1.0f, env.fonts.display.measure(s.code, 92.0f) + 14.0f * static_cast<float>(s.code.size())));
+    text(list, env.fonts.display, s.code, code.cx(), code.cy() + 0.37f * code_size, code_size, theme::ink, Align::center, 14.0f * code_size / 92.0f);
     // Waiting, plainly.
     const float pulse = 0.5f + 0.5f * std::sin(clock * 4.0f);
     list.circle(x + 70.0f, r.y + 640.0f, 8.0f, theme::accent_soft.with_alpha(0.4f + 0.6f * pulse));
@@ -451,6 +453,137 @@ void draw_sign_in(hui::gfx::DrawList &list, const Env &env, const SignInState &s
 }
 
 // ---------------------------------------------------------------------------
+// The sign-in screen. Nothing on it has the cursor: the code is for a phone, and Circle goes on without an account
+// (the chip the sign-in dialog uses for Cancel), so the code, not a button, is what the screen is about.
+
+namespace
+{
+
+void wall_columns(hui::gfx::DrawList &list, const std::vector<WallTile> &wall, float clock)
+{
+    // Columns of posters, each a strip drifting slowly, the next one the other way; a poster leaves at one end as the
+    // next comes in at the other. The pictures are made at the size drawn (ArtKind::wall), so moving they stay sharp.
+    constexpr float kW = 216.0f, kH = 324.0f, kGap = 26.0f, kPeriod = kH + kGap, kSpeed = 9.0f;
+    const int n = static_cast<int>(wall.size());
+    if (n == 0)
+        return;
+    for (int col = 0; static_cast<float>(col) * (kW + kGap) < theme::kScreenW + kW; ++col)
+    {
+        const float offset = (col % 2 ? -0.5f * kPeriod : 0.0f) + clock * (col % 2 ? -kSpeed : kSpeed);
+        const float x = -40.0f + static_cast<float>(col) * (kW + kGap);
+        for (int j = static_cast<int>(std::floor((-kH - offset) / kPeriod)) + 1;
+             offset + static_cast<float>(j) * kPeriod < theme::kScreenH; ++j)
+        {
+            const WallTile &tile = wall[static_cast<std::size_t>(((col * 4 + j) % n + n) % n)];
+            if (tile.id != 0 && tile.alpha > 0.0f)
+                list.image(tile.id, {x, offset + static_cast<float>(j) * kPeriod, kW, kH}, kFullUv,
+                           Color::rgb(0xffffff, 0.92f * tile.alpha));
+        }
+    }
+}
+
+void numbered_steps(hui::gfx::DrawList &list, const Env &env, float x, float baseline, const std::string &link)
+{
+    constexpr float kSize = 30.0f, kGap = 62.0f;
+    const auto number = [&](int n, float b) {
+        list.circle(x + 19.0f, b - kSize * 0.34f, 19.0f, theme::accent);
+        char digit[4];
+        std::snprintf(digit, sizeof(digit), "%d", n);
+        text(list, env.fonts.semibold, digit, x + 19.0f, b - kSize * 0.34f + 8.0f, 22.0f, Color::rgb(0xffffff), Align::center);
+    };
+    const float tx = x + 56.0f;
+    number(1, baseline);
+    text(list, env.fonts.regular, "Scan the code with your phone", tx, baseline, kSize, theme::ink_2);
+    number(2, baseline + kGap);
+    text(list, env.fonts.regular, "or go to", tx, baseline + kGap, kSize, theme::ink_2);
+    const float w = env.fonts.regular.measure("or go to ", kSize);
+    text(list, env.fonts.semibold, link, tx + w, baseline + kGap, kSize, theme::accent_soft);
+    number(3, baseline + 2.0f * kGap);
+    text(list, env.fonts.regular, "and enter this code", tx, baseline + 2.0f * kGap, kSize, theme::ink_2);
+}
+
+} // namespace
+
+void draw_sign_in_screen(hui::gfx::DrawList &list, const Env &env, const SignInState &s, const std::vector<WallTile> &wall,
+                         float clock, float t)
+{
+    // In two halves: first its own ground (over the boot's light coming in; going out, over the Board), then on it the
+    // wall and the words, the card a moment after them; going, the same in reverse, so the screen and what is under
+    // it are never seen through each other. The dark over the wall is at full strength whenever the ground is, so the
+    // posters only ever come up to where they rest, never brighter on the way.
+    const float in = std::clamp(t, 0.0f, 1.0f);
+    const float ground = std::min(1.0f, in * 2.0f), content = std::clamp(in * 2.0f - 1.0f, 0.0f, 1.0f);
+    list.push_opacity(ground);
+    list.rounded_rect({0, 0, theme::kScreenW, theme::kScreenH}, 0, theme::ground);
+    list.push_opacity(content);
+    wall_columns(list, wall, clock);
+    list.pop_opacity();
+    // The wall falls back into the dark where the words are.
+    list.rounded_rect({0, 0, 1000.0f, theme::kScreenH}, 0, theme::ground.with_alpha(0.96f));
+    list.gradient_rect_h({1000.0f, 0, theme::kScreenW - 1000.0f, theme::kScreenH}, 0, theme::ground.with_alpha(0.96f),
+                         theme::ground.with_alpha(0.58f));
+    list.gradient_rect({0, 0, theme::kScreenW, 260.0f}, 0, theme::ground.with_alpha(0.75f), theme::ground.with_alpha(0.0f));
+    list.gradient_rect({0, theme::kScreenH - 300.0f, theme::kScreenW, 300.0f}, 0, theme::ground.with_alpha(0.0f),
+                       theme::ground.with_alpha(0.85f));
+    list.pop_opacity();
+
+    list.push_opacity(content);
+    const float rise = (1.0f - content) * 14.0f;
+    list.push_transform(1.0f, 0.0f, 0.0f, 0.0f, rise);
+    const float x = 190.0f;
+    if (env.icons.logo != 0)
+        list.image(env.icons.logo, {x, 176.0f, 92.0f, 92.0f}, kFullUv, Color::rgb(0xffffff));
+    text(list, env.fonts.display, s.title, x, 384.0f, 78.0f, theme::ink, Align::left, -0.02f * 78.0f);
+    text(list, env.fonts.regular, "Your addons, library and Continue Watching, on this PS5.", x, 442.0f, 30.0f, theme::ink_2);
+    numbered_steps(list, env, x, 548.0f, s.link.substr(0, s.link.find('/'))); // the site; its code is in the box
+    // Going on without an account is there, but quiet: on the card's bottom line, the reassurance beside it.
+    constexpr float kChipY = 886.0f;
+    const float chip_w = draw_chip(list, env, hui::ui::Button::circle, "Continue without account", x, kChipY);
+    text(list, env.fonts.regular, "You can sign in later from Settings.", x + chip_w + 22.0f, kChipY + 8.0f, 22.0f,
+         theme::ink_3);
+    list.pop_transform();
+    list.pop_opacity();
+
+    const float card_in = std::clamp((content - 0.1f) / 0.9f, 0.0f, 1.0f);
+    const Rect p{1180.0f, 176.0f, 560.0f, 736.0f};
+    list.push_opacity(card_in);
+    list.push_transform(0.97f + 0.03f * card_in, p.cx(), p.cy(), 0.0f, (1.0f - card_in) * 14.0f);
+    list.shadow({p.x + 14.0f, p.y + 40.0f, p.w - 28.0f, p.h - 20.0f}, 44.0f, 70.0f, Color::rgb(0x000000, 0.55f));
+    list.bordered_rect(p, 44.0f, Color::rgb(0x0d0b16, 0.97f), 1.5f, theme::hairline);
+    // The QR code on white, so any phone reads it (the place stays dark while there is no code).
+    const Rect qr{p.x + 70.0f, p.y + 60.0f, 420.0f, 420.0f};
+    if (s.qr != 0)
+    {
+        list.shadow({qr.x + 8.0f, qr.y + 22.0f, qr.w - 16.0f, qr.h - 10.0f}, 30.0f, 44.0f, Color::rgb(0x000000, 0.45f));
+        list.rounded_rect(qr, 30.0f, Color::rgb(0xffffff));
+        list.image(s.qr, qr.inset(qr.w * 0.07f), kFullUv, Color::rgb(0xffffff));
+    }
+    else
+    {
+        list.rounded_rect(qr, 30.0f, theme::surface);
+    }
+    const Rect code{p.x + 70.0f, p.y + 512.0f, 420.0f, 132.0f};
+    list.rounded_rect(code, 28.0f, theme::surface);
+    if (!s.code.empty())
+    {
+        float size = 82.0f;
+        const float track = size * 0.16f * static_cast<float>(s.code.size());
+        size = std::min(size, size * (code.w - 48.0f) / std::max(1.0f, env.fonts.display.measure(s.code, size) + track));
+        text(list, env.fonts.display, s.code, code.cx(), code.cy() + size * 0.36f, size, theme::ink, Align::center,
+             size * 0.16f);
+    }
+    // Waiting, plainly (or why there is no code yet: it is asked for again on its own; the log has the reason).
+    const char *label = !s.code.empty() ? "Waiting for your phone"
+                        : s.failed      ? "Could not get a code. Trying again..."
+                                        : "Getting a code...";
+    const float pulse = 0.5f + 0.5f * std::sin(clock * 4.0f);
+    const float lw = env.fonts.regular.measure(label, 24.0f);
+    const float lx = p.cx() - (lw + 30.0f) * 0.5f;
+    list.circle(lx + 8.0f, p.y + 686.0f, 8.0f, theme::accent_soft.with_alpha(0.4f + 0.6f * pulse));
+    text(list, env.fonts.regular, label, lx + 30.0f, p.y + 694.0f, 24.0f, theme::ink_3);
+    list.pop_transform();
+    list.pop_opacity();
+}
 
 // ---------------------------------------------------------------------------
 

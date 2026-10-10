@@ -17,6 +17,9 @@
 #include "player.h"
 #include "subtitles.h"
 #include "tasks.h"
+#include "watched.hpp"
+#include "debrid.h"
+#include "hdr_out.hpp"
 #include "update.hpp"
 #include "audio/cues.hpp"
 #include "core/input.hpp"
@@ -129,13 +132,23 @@ class Session
     // HDR output (gl/hdr_out.cpp): the picture on show is a 10-bit PQ one in its own texture. The shell leaves it
     // out of the draw list and puts its rectangle (1920 x 1080 layout) in hdr_rect; the HDR pass draws it.
     bool video_hdr = false;
-    std::uint32_t video_texture_hdr = 0;
+    std::uint32_t video_texture_hdr = 0; // the CPU-made 10-bit picture...
     int video_hdr_w = 0, video_hdr_h = 0;
+    bool video_gpu = false;              // ...or the planes below, converted in the HDR pass
+    std::uint32_t video_plane_y = 0, video_plane_uv = 0;
+    hdr::SdrTarget sdr_target_;      // 10-bit SDR pictures converted on the GPU: video_texture is its texture
+    bool video_sdr_gpu_ = false;
+    int video_plane_w = 0, video_plane_h = 0;
+    bool video_high = false, video_hlg = false;
+    int video_disp_w = 0, video_disp_h = 0; // the size the HDR picture is shown at
     hui::gfx::Rect hdr_rect;
     // Whether HDR output should be on now (an HDR10 or HLG video is playing and the setting allows it), and the
     // main loop telling back whether the screen really is in HDR.
     bool hdr_wanted() const;
     void set_hdr_scanout(bool on);
+    // Refresh-rate matching (gl/vrr.cpp): the setting, and the frame rate of the video playing now (0: none).
+    bool vrr_enabled() const;
+    double video_fps() const;
     void hdr_status_changed(const std::string &text); // the HDR output's state changed: Settings shows it (no pop-up)
     bool typing() const
     {
@@ -147,6 +160,12 @@ class Session
     DropdownState dropdown;
     bool sign_in_open = false;
     SignInState sign_in;
+    // The sign-in is the screen before the Board (start-up, no account) rather than the dialog. `wall`: the posters
+    // behind it (GL textures in small copies, 0 while one is on its way).
+    bool sign_in_screen = false;
+    std::vector<std::uint32_t> wall;
+    // Opens that screen's sign-in if the loaded profile has no account; false when it has one.
+    bool start_sign_in_screen();
     bool toast_open = false;
     ToastState toast;
     bool update_open = false; // the update dialog (session_update.cpp)
@@ -195,6 +214,10 @@ class Session
     {
         return boot_done_;
     }
+    // The sign-in screen is over (signed in, or no account): is the Board ready to show, with this account's own
+    // catalogs and the first pictures? If not, the start-up waits again (boot_ready() is false until it is).
+    // Returns true when the Board can be shown at once.
+    bool board_ready_or_wait();
     void dropdown_confirm();
     void dropdown_cancel();
     void sign_in_cancel();
@@ -309,6 +332,11 @@ class Session
                        std::function<void(int)> chosen);
     void login_start();
     void login_poll();
+    // Real-Debrid and Torbox (session_debrid.cpp)
+    debrid::Credentials debrid_creds() const;
+    void debrid_settings_press(int service); // 1 Real-Debrid, 2 Torbox
+    void debrid_connect_torbox();
+    void debrid_poll();
     void login_done(const std::string &auth_key);
     void sign_out();
     // detail
@@ -341,6 +369,17 @@ class Session
     void watch_update();
     void watch_stop(bool ended);
     void watch_save_progress(bool final, bool force_finished = false);
+    // The account's library item, kept the way stremio-core's Player model keeps it (session_watch.cpp).
+    json &library_ensure(const Item &item);
+    void library_begin();                          // a video is selected: a different one than the item's resets its offset
+    void library_time_changed(bool force);         // once a second while playing (core: TimeChanged)
+    void library_seek(double target_s);            // core: Seek
+    void library_finish(bool force_finished);      // core: Unload (and NextVideo)
+    void library_push(const char *why, const std::string &id);           // core: UpdateLibraryItem, at most every 90 s while playing
+    void library_mark_video(const std::string &video_id, bool is_watched); // core: MarkVideoAsWatched
+    bool library_set_watched_bit(json &state, const std::string &video_id, bool on);
+    bool account_watched(const std::string &video_id) const;
+    void watch_seek(double target_s);              // a seek the viewer asked for
     void watch_show_info();
     void watch_build_menu();
     void watch_select_sub(int index);
@@ -391,6 +430,8 @@ class Session
     bool addons_loading_ = false;
     bool board_loading_ = false; // some catalog of the Board has not answered yet
     bool boot_done_ = false;
+    std::vector<std::string> wall_urls_; // the sign-in screen's posters, in the order they were first seen
+    bool boot_again_ = false; // waiting again, after the sign-in screen, for the account's own Board
     double boot_start_ = 0.0;
     int addons_gen_ = 0;
     std::map<std::string, json> library_; // library items by _id
@@ -432,7 +473,15 @@ class Session
     std::string login_code_raw_, login_qr_url_;
     double login_next_poll_ = 0, login_expires_ = 0;
     bool login_polling_ = false;
+    bool login_failed_ = false; // no code could be got (tried again shortly while the sign-in screen is up)
+    double login_retry_at_ = 0;
     int login_gen_ = 0;
+    int debrid_confirm_ = 0;                     // 1 or 2: the press that disconnects is pending
+    bool dl_active_ = false;                     // the sign-in dialog is showing a Torbox code
+    std::string dl_device_code_;
+    double dl_next_poll_ = 0, dl_expires_ = 0;
+    int dl_interval_ = 5;
+    bool dl_polling_ = false;
     bool confirm_sign_out_ = false;
 
     // detail
@@ -465,6 +514,10 @@ class Session
     int w_sub_active_ = -1; // index in w_subs_, -1 off
     double w_sub_delay_ = 0;
     double w_info_until_ = 0, w_last_save_ = 0, w_last_saved_pos_ = -1;
+    double w_lib_tick_ = 0, w_lib_push_ = 0;
+    bool w_lib_watched_sent_ = false;
+    mutable std::string d_bits_src_;
+    mutable watched::Bits d_bits_;
     bool hdr_scanout_ = false;
     bool w_started_ = false, w_menu_built_ = false, w_auto_sub_done_ = false, w_heavy_warned_ = false, w_colour_warned_ = false;
     bool w_menu_dirty_ = false;
@@ -473,6 +526,7 @@ class Session
     std::shared_ptr<std::atomic<bool>> launch_cancel_;
     std::string subtitle_shown_;
     // the torrent's statistics while it starts or buffers
+    double t_logged_ = 0;
     std::string t_stats_url_;
     int t_gen_ = 0;
     double t_next_poll_ = 0;

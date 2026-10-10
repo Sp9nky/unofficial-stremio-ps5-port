@@ -28,6 +28,7 @@ enum SettingIndex
     kProfile,
     kTorrents,
     kServer,
+    kTorbox,
     kSubLangs,
     kAutoSubs,
     kSubSize,
@@ -35,6 +36,7 @@ enum SettingIndex
     kAutoplay,
     kUiSounds,
     kHdr,
+    kVrr,
     kAddAddon,
     kUpdates,
     kReload,
@@ -119,6 +121,10 @@ bool Session::init(const std::string &base_dir, const std::string &data_dir, hui
     load_addons();
     if (signed_in())
         load_library();
+    // No account and no one to choose between: the sign-in screen comes before the Board, its code asked for now so
+    // that it is there when the boot animation ends. (With several profiles it comes after the one picked, if needed.)
+    if (profiles().size() <= 1)
+        start_sign_in_screen();
     return true;
 }
 
@@ -150,8 +156,10 @@ void Session::load_prefs()
         prefs_.autoplay_next = jbool(j, "autoplay_next", prefs_.autoplay_next);
         prefs_.ui_sounds = jbool(j, "ui_sounds", prefs_.ui_sounds);
         prefs_.hdr_output = jbool(j, "hdr_output", prefs_.hdr_output);
+        prefs_.match_refresh = jbool(j, "match_refresh", prefs_.match_refresh);
         prefs_.auth_key = jstr(j, "auth_key");
         prefs_.user_email = jstr(j, "user_email");
+        prefs_.torbox_key = jstr(j, "torbox_key");
         const json &ex = jobj(j, "extra_addons");
         if (ex.is_array())
             for (const auto &v : ex)
@@ -172,9 +180,12 @@ json Session::prefs_json(const Prefs &p)
     j["autoplay_next"] = p.autoplay_next;
     j["ui_sounds"] = p.ui_sounds;
     j["hdr_output"] = p.hdr_output;
+    j["match_refresh"] = p.match_refresh;
     j["extra_addons"] = p.extra_addons;
     j["auth_key"] = p.auth_key;
     j["user_email"] = p.user_email;
+    if (!p.torbox_key.empty())
+        j["torbox_key"] = p.torbox_key;
     return j;
 }
 
@@ -445,6 +456,11 @@ void Session::refresh_settings()
                                 : "Your Stremio streaming server downloads torrents. Press Cross to use the app's own.");
     set(kServer, Kind::value, "Streaming server", prefs_.server_url.empty() ? "Not set" : prefs_.server_url,
         "Optional: for server transcoding. Your Stremio server, for example http://192.168.1.20:11470.");
+    set(kTorbox, Kind::value, "Torbox", prefs_.torbox_key.empty() ? "Not connected" : "Connected",
+        debrid_confirm_ == 2 ? "Press Cross again to disconnect Torbox."
+        : prefs_.torbox_key.empty()
+            ? "Torrents and streams are played through your Torbox account (only the ones already cached there). Press Cross to connect with a code."
+            : "Press Cross to disconnect.");
     set(kSubLangs, Kind::value, "Subtitle languages", prefs_.subtitle_langs.empty() ? "None" : prefs_.subtitle_langs,
         "Preferred order, for example \"gre, eng\".");
     set(kAutoSubs, Kind::toggle, "Subtitles on automatically", "", "Turn subtitles on automatically in your preferred language.",
@@ -458,6 +474,10 @@ void Session::refresh_settings()
     set(kHdr, Kind::value, "HDR output", prefs_.hdr_output ? std::string(hdr::status()) : std::string("Off"),
         "Send the picture to the TV as HDR (video as HDR10 or HLG, the interface at normal white). Tried when the app "
         "starts; the line says what the console answered. Press Cross to turn it on or off.");
+    set(kVrr, Kind::toggle, "Match refresh rate to video", "",
+        "With VRR on in the console's video settings and a TV that supports it, the TV refreshes at a multiple of the "
+        "video's frame rate (a 24 fps film at 48 Hz, each frame shown twice) instead of a fixed 60 Hz, so motion is even.",
+        prefs_.match_refresh);
     set(kAddAddon, Kind::value, "Add addon by URL", "",
         prefs_.extra_addons.empty() ? "An addon's manifest URL. Remove added addons from the Addons page."
                                     : std::to_string(prefs_.extra_addons.size()) + " added here.");
@@ -472,6 +492,8 @@ void Session::settings_activate(int row)
 {
     if (row != kAccount && confirm_sign_out_)
         confirm_sign_out_ = false;
+    if (row != kTorbox)
+        debrid_confirm_ = 0;
     switch (row)
     {
     case kAccount:
@@ -507,6 +529,9 @@ void Session::settings_activate(int row)
             refresh_settings();
         });
         break;
+    case kTorbox:
+        debrid_settings_press(2);
+        return;
     case kSubLangs:
         ask_text([this](const std::string &v) {
             if (trim(v).empty())
@@ -591,6 +616,11 @@ void Session::settings_activate(int row)
         save_prefs();
         cue(hui::audio::Cue::toggle);
         break;
+    case kVrr:
+        prefs_.match_refresh = !prefs_.match_refresh;
+        save_prefs();
+        cue(hui::audio::Cue::toggle);
+        break;
     case kReload:
         addons_reload();
         break;
@@ -659,6 +689,7 @@ void Session::login_start()
     login_code_raw_.clear();
     login_qr_url_.clear();
     login_polling_ = false;
+    login_failed_ = false;
     bg<LinkCode>([]() { return link_create(); },
                  [this, gen](LinkCode &lc) {
                      if (gen != login_gen_ || !sign_in_open)
@@ -666,6 +697,10 @@ void Session::login_start()
                      if (!lc.ok)
                      {
                          sign_in.status = "Could not get a code: " + lc.error;
+                         sign_in.failed = true;
+                         dlog("sign-in: could not get a code: %s", lc.error.c_str());
+                         login_failed_ = true;
+                         login_retry_at_ = now_seconds() + 5;
                          return;
                      }
                      login_code_raw_ = lc.code;
@@ -683,7 +718,19 @@ void Session::login_start()
 
 void Session::login_poll()
 {
+    if (dl_active_)
+    {
+        debrid_poll();
+        return;
+    }
     sign_in.qr = login_qr_url_.empty() ? 0 : tex_.get(login_qr_url_, ArtKind::qr);
+    // The sign-in screen keeps a code up however long it waits: a new one when the code runs out or could not be got.
+    if (sign_in_screen && (login_failed_ ? now_seconds() >= login_retry_at_
+                                         : !login_code_raw_.empty() && now_seconds() > login_expires_))
+    {
+        login_start();
+        return;
+    }
     if (login_code_raw_.empty() || login_polling_ || now_seconds() < login_next_poll_)
         return;
     if (now_seconds() > login_expires_)
@@ -709,8 +756,33 @@ void Session::login_poll()
 void Session::sign_in_cancel()
 {
     ++login_gen_;
+    dl_active_ = false;
     sign_in_open = false;
+    sign_in_screen = false;
     login_code_raw_.clear();
+}
+
+bool Session::board_ready_or_wait()
+{
+    boot_again_ = true;
+    if (boot_check(1.0)) // as if a second had passed: the time limits count from when waiting starts (below)
+    {
+        boot_again_ = false;
+        return true;
+    }
+    boot_done_ = false;
+    boot_start_ = now_seconds();
+    dlog("boot: waiting again for the Board after the sign-in screen");
+    return false;
+}
+
+bool Session::start_sign_in_screen()
+{
+    if (signed_in())
+        return false;
+    login_start();
+    sign_in_screen = true;
+    return true;
 }
 
 void Session::login_done(const std::string &auth_key)
@@ -769,6 +841,7 @@ void Session::update(float dt, const Cursor &cursor)
     if (!boot_done_ && boot_check(now - boot_start_))
     {
         boot_done_ = true;
+        boot_again_ = false;
         dlog("boot: ready after %.1f s", now - boot_start_);
     }
     if (toast_open && now > toast_until_)
@@ -823,9 +896,22 @@ bool Session::boot_check(double t) const
 {
     if (t > 10.0)
         return true;
-    if (t < 1.8)
-        return false; // the mark has its moment
+    // The mark has its moment. After signing in the wait lasts at least 2.5 s: the account's own catalogs come, and
+    // their first pictures (and the wallpapers behind them) need time to arrive before Home is shown.
+    if (t < (boot_again_ ? (signed_in() ? 2.5 : 0.6) : 1.8))
+        return false;
+    // The sign-in screen comes first and does not wait for the Board: it needs its code, and the wall fills in as the
+    // posters arrive. (The Board is got ready behind it.)
+    if (sign_in_screen && !boot_again_)
+        return sign_in.qr != 0 || login_failed_;
+    // Waiting again after signing in: the account's own catalogs (and its library) must have answered, not the ones the
+    // sign-in screen's wall came from.
     const bool answered = !addons_loading_ && !board_loading_;
+    // What is on the Board until the account's addons have answered is the previous list (the sign-in screen's own):
+    // it must not count as ready. After that it is as at the first start: three rows are enough (a dead addon's catalog
+    // must not hold the start up for its timeout), and the library, up to 5 s.
+    if (boot_again_ && (addons_loading_ || (signed_in() && !library_loaded_ && t <= 5.0)))
+        return false;
     const std::size_t rows = board.rows.size();
     if (rows == 0)
         return answered; // nothing to wait for: the page tells what is wrong
@@ -839,6 +925,20 @@ bool Session::boot_check(double t) const
         for (std::size_t c = 0; c < items.size() && c < board.rows[r].items.size() && c < 8; ++c)
             if (!items[c].poster.empty() && board.rows[r].items[c].poster == 0)
                 return false;
+    }
+    // The wallpapers behind the first row's first cards must be in (on disk, ready to go on the GPU) too: a move
+    // along the row then shows each at once. Four of the first five that have one (the rest keep coming).
+    {
+        const std::vector<Item> &first_row = board_[static_cast<std::size_t>(board_map_[0])].items;
+        int wanted = 0, have = 0;
+        for (std::size_t c = 0; c < first_row.size() && c < 5; ++c)
+            if (!first_row[c].background.empty())
+            {
+                ++wanted;
+                have += tex_.cached(first_row[c].background, ArtKind::backdrop) ? 1 : 0;
+            }
+        if (have < std::min(wanted, 4))
+            return false;
     }
     const Item &first = board_[static_cast<std::size_t>(board_map_[0])].items.front();
     if (!first.background.empty())
@@ -866,13 +966,49 @@ void Session::refresh_art(const Cursor &cursor)
         {
             Title &t = board.rows[r].items[c];
             const int col = static_cast<int>(c);
-            t.poster = fetch(items[c].poster, ArtKind::poster, row_near && col < cursor.board_col + 12);
+            const bool poster_near = row_near && col < cursor.board_col + 12;
+            t.poster = fetch(items[c].poster, ArtKind::poster, poster_near);
             const bool hero = static_cast<int>(r) == cursor.board_row && std::abs(col - cursor.board_col) <= 1;
-            t.backdrop = fetch(items[c].background, ArtKind::backdrop, hero);
+            // On the GPU before the cursor gets there (two cards along, and the cards above and below), so a move
+            // finds its wallpaper ready; about 15 MB each.
+            const int row_gap = std::abs(static_cast<int>(r) - cursor.board_row);
+            const bool resident = hero || (row_gap == 0 && std::abs(col - cursor.board_col) <= 2) ||
+                                  (row_gap == 1 && col == cursor.board_col);
+            t.backdrop = fetch(items[c].background, ArtKind::backdrop, resident);
+            // Ready on disk ahead of time (behind everything on screen): the wallpapers of the cards around the cursor,
+            // so moving to a card shows its picture at once, and while the boot animation plays, the first rows'
+            // wallpapers and the first posters of every row.
+            const int dr = std::abs(static_cast<int>(r) - cursor.board_row), dc = col - cursor.board_col;
+            // (also while the sign-in screen is up: Continue without account then finds the Board ready)
+            const bool starting = !boot_done_ || sign_in_screen;
+            if (!hero && ((dr == 0 && dc >= -3 && dc <= 8) || (dr == 1 && dc >= -1 && dc <= 5) || (starting && r < 3 && c < 8)))
+                tex_.warm(items[c].background, ArtKind::backdrop);
+            if (!poster_near && starting && c < 10)
+                tex_.warm(items[c].poster, ArtKind::poster);
             // The library lists a title without its backdrop or story: ask the addons.
             if (hero && (items[c].background.empty() || items[c].description.empty()))
                 want_meta(items[c]);
         }
+    }
+
+    // The sign-in screen's wall: the first posters of the Board's first rows, each once, in copies made at the wall's
+    // size. The list only grows (rows arrive in any order), so a tile never moves once it is there.
+    wall.clear();
+    if (sign_in_screen)
+    {
+        constexpr std::size_t kWallPosters = 36; // the wall's tiles (ui/overlays.cpp)
+        for (std::size_t r = 0; r < board.rows.size() && r < board_map_.size() && wall_urls_.size() < kWallPosters; ++r)
+        {
+            const std::vector<Item> &items = board_[static_cast<std::size_t>(board_map_[r])].items;
+            for (std::size_t c = 0; c < items.size() && c < 10 && wall_urls_.size() < kWallPosters; ++c)
+            {
+                const std::string &u = items[c].poster;
+                if (!u.empty() && std::find(wall_urls_.begin(), wall_urls_.end(), u) == wall_urls_.end())
+                    wall_urls_.push_back(u);
+            }
+        }
+        for (const std::string &u : wall_urls_)
+            wall.push_back(tex_.get(u, ArtKind::wall));
     }
 
     // Search results: the same, without a hero.
@@ -899,6 +1035,9 @@ void Session::refresh_art(const Cursor &cursor)
         const int d = static_cast<int>(i) - cursor.discover;
         t.poster = fetch(disc_items_[i].poster, ArtKind::poster, d > -12 && d < 24);
         t.backdrop = fetch(disc_items_[i].background, ArtKind::backdrop, d == 0);
+        if (d != 0 && d >= -2 && d <= 6)
+            tex_.warm(disc_items_[i].background, ArtKind::backdrop); // the next previews, ready on disk
+
     }
 
     // Library
@@ -910,7 +1049,9 @@ void Session::refresh_art(const Cursor &cursor)
 
     // Addons
     for (std::size_t i = 0; i < addons.items.size() && i < addon_logos_.size(); ++i)
-        addons.items[i].logo = fetch(addon_logos_[i], ArtKind::icon, true);
+        // Only when the Addons page is open: 26 logos from dead hosts held every download slot for 10 s each (they are
+        // fetched at the same priority as the pictures of the page on show).
+        addons.items[i].logo = fetch(addon_logos_[i], ArtKind::icon, page_ == Page::addons);
 
     // A title's page
     if (d_open_)

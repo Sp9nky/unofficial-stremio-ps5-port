@@ -27,11 +27,14 @@ void draw_scripts(hui::gfx::DrawList &list, hui::gfx::BackdropSpec &backdrop, co
         {"Mixed", "Matrix – ماتريكس (1999)"},
         {"Mixed", "Hellas Γεια σου Κόσμε 2024"},
         {"Japanese", "千と千尋の神隠し"},
+        {"Chinese", "霸王别姬 · 無間道"},
+        {"Korean", "기생충 · 올드보이"},
+        {"Thai", "ต้มยำกุ้ง"},
         {"Hebrew", "הסנדק"},
         {"Long title", "The Extraordinarily Long Title of a Film That Nobody Asked For: Part II"},
     };
     apply_page_backdrop(backdrop, 0.0f);
-    float y = 96.0f;
+    float y = 70.0f;
     for (const Row &row : rows)
     {
         hui::ui::text(list, fonts.regular, row.label, 110.0f, y, 22.0f, theme::ink_3);
@@ -39,7 +42,7 @@ void draw_scripts(hui::gfx::DrawList &list, hui::gfx::BackdropSpec &backdrop, co
                       theme::ink);
         hui::ui::text(list, fonts.display, fonts.display.font->fit(row.text, 36.0f, 760.0f), 1100.0f, y + 2.0f, 36.0f,
                       theme::ink_2, hui::gfx::Align::left, -0.6f);
-        y += 74.0f;
+        y += 66.0f;
     }
 }
 

@@ -53,51 +53,6 @@ bool is_rtl(uint32_t cp) {
 	return (cp >= 0x0590 && cp <= 0x08ff) || (cp >= 0xfb1d && cp <= 0xfdff) || (cp >= 0xfe70 && cp <= 0xfeff);
 }
 
-// RML entities used by subtitles (subtitles.cpp) back to text, and the text
-// escaped again afterwards.
-std::string unescape(const std::string& s) {
-	std::string out;
-	for (size_t i = 0; i < s.size(); i++) {
-		if (s[i] == '&') {
-			size_t semi = s.find(';', i);
-			if (semi != std::string::npos && semi - i <= 6) {
-				std::string e = s.substr(i, semi - i + 1);
-				const char* r = e == "&amp;"    ? "&"
-				                : e == "&lt;"   ? "<"
-				                : e == "&gt;"   ? ">"
-				                : e == "&quot;" ? "\""
-				                : e == "&apos;" ? "'"
-				                : e == "&#39;"  ? "'"
-				                : e == "&#123;" ? "{"
-				                : e == "&#125;" ? "}"
-				                                : nullptr;
-				if (r) {
-					out += r;
-					i = semi;
-					continue;
-				}
-			}
-		}
-		out += s[i];
-	}
-	return out;
-}
-
-std::string escape(const std::string& s) {
-	std::string out;
-	for (char c : s) {
-		switch (c) {
-		case '&': out += "&amp;"; break;
-		case '<': out += "&lt;"; break;
-		case '>': out += "&gt;"; break;
-		case '{': out += "&#123;"; break;
-		case '}': out += "&#125;"; break;
-		default: out += c;
-		}
-	}
-	return out;
-}
-
 }  // namespace
 
 bool has_rtl(const std::string& utf8) {
@@ -119,7 +74,14 @@ std::string bidi_visual(const std::string& utf8) {
 	std::vector<uint32_t> in = utf8_decode(utf8);
 	if (in.empty()) return utf8;
 	std::vector<FriBidiChar> logical(in.begin(), in.end()), visual(in.size() + 1);
-	FriBidiParType base = FRIBIDI_PAR_ON;  // from the text itself
+	// The line's direction: right-to-left when most of its letters are (a line that starts with a name in Latin
+	// letters but is Arabic or Hebrew all through still reads right to left); else from its first letter.
+	size_t rtl = 0, latin = 0;
+	for (uint32_t cp : in) {
+		if (is_rtl(cp)) rtl++;
+		else if ((cp >= 'A' && cp <= 'Z') || (cp >= 'a' && cp <= 'z') || (cp >= 0xc0 && cp <= 0x24f)) latin++;
+	}
+	FriBidiParType base = rtl > 0 && rtl >= latin ? FRIBIDI_PAR_RTL : FRIBIDI_PAR_ON;
 	// log2vis: bidi reordering plus Arabic shaping (presentation forms,
 	// lam-alef ligatures).
 	if (!fribidi_log2vis(logical.data(), FriBidiStrIndex(logical.size()), &base, visual.data(), nullptr, nullptr,
@@ -135,37 +97,4 @@ std::string bidi_visual(const std::string& utf8) {
 #else
 	return utf8;
 #endif
-}
-
-std::string bidi_visual_rml(const std::string& rml) {
-	if (!has_rtl(rml)) return rml;
-	std::string out;
-	size_t start = 0;
-	for (;;) {
-		size_t br = rml.find("<br/>", start);
-		std::string line = rml.substr(start, br == std::string::npos ? std::string::npos : br - start);
-		if (has_rtl(line)) {
-			// Text without its tags, reordered; italics/bold for the whole line.
-			bool em = line.find("<em>") != std::string::npos, strong = line.find("<strong>") != std::string::npos;
-			std::string text;
-			for (size_t i = 0; i < line.size(); i++) {
-				if (line[i] == '<') {
-					size_t end = line.find('>', i);
-					if (end != std::string::npos) {
-						i = end;
-						continue;
-					}
-				}
-				text += line[i];
-			}
-			line = escape(bidi_visual(unescape(text)));
-			if (strong) line = "<strong>" + line + "</strong>";
-			if (em) line = "<em>" + line + "</em>";
-		}
-		out += line;
-		if (br == std::string::npos) break;
-		out += "<br/>";
-		start = br + 5;
-	}
-	return out;
 }

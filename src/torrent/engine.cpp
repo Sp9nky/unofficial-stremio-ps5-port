@@ -21,6 +21,7 @@
 #include <deque>
 #include <map>
 #include <mutex>
+#include <regex>
 #include <set>
 #include <thread>
 
@@ -51,15 +52,18 @@ namespace bt {
 namespace {
 
 const int kBlock = 16 * 1024;
-const int kMaxPeers = 80;            // connected at once
+// The names are the streaming server's torrent settings (stremio-core's streaming-server Settings).
+const int kMaxPeers = 200;           // btMaxConnections: the most peers connected at once (core's peerSearch max)
+const int kMinPeers = 40;            // core's peerSearch min: below this the engine keeps looking for peers
+const int kMinPeersForStable = 5;    // btMinPeersForStable
 // Most addresses from trackers and the DHT never answer (gone, or behind a
 // router): try many at once and give up on each soon, so the few that work
 // are found in seconds rather than minutes (on the PS5: 5 of 1000 answered,
 // 30 attempts of 7 s each took minutes to get through the list).
 const int kMaxConnecting = 80;       // connection attempts at once
 const double kConnectTimeout = 4;
-const double kHandshakeTimeout = 15;
-const double kRequestTimeout = 15;   // a block not here by then is asked from someone else
+const double kHandshakeTimeout = 15;  // btHandshakeTimeout
+const double kRequestTimeout = 15;   // btRequestTimeout: a block not here by then is asked from someone else
 const double kChokedTimeout = 60;    // a peer that keeps us choked this long makes room for another
 const uint32_t kMaxMessage = 2u << 20;
 // How far ahead of the player to download: half the 6 GB cache, about a
@@ -1276,7 +1280,7 @@ void upkeep(Torrent* t, double now) {
 			connecting++;
 		}
 	}
-	t->want_peers = !idle && active < kMaxPeers / 2;
+	t->want_peers = !idle && active < kMinPeers;
 
 	// Speeds, once a second
 	if (now - t->rate_at >= 1) {
@@ -1788,6 +1792,11 @@ void Engine::configure(const std::string& data_dir, int64_t cache_bytes) {
 	std::lock_guard<std::mutex> lock(impl().mu);
 	impl().data_dir = data_dir;
 	impl().cache_bytes = cache_bytes;
+	// The streaming server's torrent settings, as this engine has them (no speed limits).
+	dlog("torrent settings: cacheSize=%lld btMaxConnections=%d btHandshakeTimeout=%.0fms btRequestTimeout=%.0fms "
+	     "btMinPeersForStable=%d btDownloadSpeedSoftLimit=none btDownloadSpeedHardLimit=none peerSearch={min:%d,max:%d}",
+	     static_cast<long long>(cache_bytes), kMaxPeers, kHandshakeTimeout * 1000, kRequestTimeout * 1000,
+	     kMinPeersForStable, kMinPeers, kMaxPeers);
 }
 
 void Engine::shutdown() {
@@ -1895,7 +1904,14 @@ Stats Engine::stats(const std::string& hex) {
 	s.found = true;
 	s.has_metadata = t->has_meta;
 	for (auto& p : t->peers)
-		if (!p->dead && p->state == Peer::Active) s.peers++;
+		if (!p->dead && p->state == Peer::Active) {
+			s.peers++;
+			if (!p->peer_choking) s.unchoked++;
+			s.queued += int(p->reqs.size());
+		}
+	s.swarm_paused = t->idle;
+	s.peer_search_running = t->want_peers;
+	s.stable = s.unchoked >= kMinPeersForStable;
 	s.known_peers = int(t->known.size());
 	s.incoming = impl().mapped_port.load() > 0;
 	s.download_rate = t->rate;
@@ -1973,8 +1989,28 @@ int Engine::read(const std::shared_ptr<Torrent>& t, int reader_id, int file_idx,
 	return int(k);
 }
 
-int Engine::guess_file(const std::vector<FileInfo>& files, int season, int episode) {
+int Engine::guess_file(const std::vector<FileInfo>& files, int season, int episode,
+                       const std::vector<std::string>& must_include) {
 	int best = -1;
+	// fileMustInclude: every regex must match the path; the server's "f" parameters.
+	std::vector<char> allowed(files.size(), 1);
+	if (!must_include.empty()) {
+		std::vector<std::regex> res;
+		for (auto& m : must_include) {
+			try {
+				res.emplace_back(m, std::regex::ECMAScript | std::regex::icase);
+			} catch (const std::regex_error&) {
+				dlog("torrent: bad fileMustInclude pattern ignored: %s", m.c_str());
+			}
+		}
+		int n = 0;
+		for (size_t i = 0; i < files.size(); i++) {
+			for (auto& re : res)
+				if (!std::regex_search(files[i].path, re)) allowed[i] = 0;
+			n += allowed[i];
+		}
+		if (n == 0) std::fill(allowed.begin(), allowed.end(), 1);
+	}
 	if (season >= 0 && episode >= 0) {
 		char pats[4][32];
 		snprintf(pats[0], 32, "s%02de%02d", season, episode);
@@ -1982,7 +2018,7 @@ int Engine::guess_file(const std::vector<FileInfo>& files, int season, int episo
 		snprintf(pats[2], 32, "%dx%02d", season, episode);
 		snprintf(pats[3], 32, "s%02d.e%02d", season, episode);
 		for (size_t i = 0; i < files.size(); i++) {
-			if (!is_video_name(files[i].path)) continue;
+			if (!allowed[i] || !is_video_name(files[i].path)) continue;
 			std::string name = lower(files[i].path);
 			size_t sl = name.rfind('/');
 			if (sl != std::string::npos) name = name.substr(sl + 1);
@@ -1998,10 +2034,10 @@ int Engine::guess_file(const std::vector<FileInfo>& files, int season, int episo
 		if (best >= 0) return best;
 	}
 	for (size_t i = 0; i < files.size(); i++)
-		if (is_video_name(files[i].path) && (best < 0 || files[i].size > files[size_t(best)].size)) best = int(i);
+		if (allowed[i] && is_video_name(files[i].path) && (best < 0 || files[i].size > files[size_t(best)].size)) best = int(i);
 	if (best >= 0) return best;
 	for (size_t i = 0; i < files.size(); i++)
-		if (best < 0 || files[i].size > files[size_t(best)].size) best = int(i);
+		if (allowed[i] && (best < 0 || files[i].size > files[size_t(best)].size)) best = int(i);
 	return best;
 }
 

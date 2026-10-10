@@ -696,6 +696,17 @@ void Player::video_thread() {
 			bool ok = emit_frame(pts, serial, [&](Frame& f) {
 				// 4:2:0 HDR (and plain 4:2:0) through the same conversion as
 				// hardware pictures; anything else through swscale.
+				if (hdr_output_ && hdr_gpu_ && hdr_capable() && frame->format == AV_PIX_FMT_YUV420P10LE &&
+				    (frame->width & 1) == 0 && (frame->height & 1) == 0) {
+					planes_from_av(frame, f);
+					return;
+				}
+				if (sdr10_gpu() && frame->format == AV_PIX_FMT_YUV420P10LE && (frame->width & 1) == 0 &&
+				    (frame->height & 1) == 0) {
+					planes_from_av(frame, f);  // 10-bit SDR: the GPU converts it
+					f.hdr = false;
+					return;
+				}
 				if (frame->format == AV_PIX_FMT_YUV420P10LE || frame->format == AV_PIX_FMT_YUV420P) {
 					YuvPicture yp;
 					yp.y = frame->data[0];
@@ -775,7 +786,7 @@ bool Player::emit_frame(double pts, int serial, const std::function<void(Frame&)
 	f.w = dw & ~1;
 	f.h = dh & ~1;
 	f.pixels.resize(size_t(f.w) * f.h * 4);
-	f.hdr = false;  // fill() sets it when it makes an HDR picture
+	f.hdr = f.gpu = false;  // fill() sets them when it makes an HDR picture
 	fill(f);
 	f.pts = pts;
 	f.serial = serial;
@@ -864,6 +875,47 @@ bool Player::fast_convert(const YuvPicture& pic, Frame& f) {
 	return true;
 }
 
+// HDR on the GPU, as PS5MC does it: the planes of the decoded picture go to the HDR pass as they are (16-bit words,
+// at the video's own size), and the pass converts them to the screen's colours. f.pixels = the Y plane (w x h words),
+// then the UV plane (w/2 x h/2 interleaved pairs). f.dw/f.dh keep the size the picture is shown at.
+void Player::planes_from_hw(const HwDecoder::Picture& pic, Frame& f, bool high) {
+	f.dw = f.w;
+	f.dh = f.h;
+	f.w = pic.width & ~1;
+	f.h = pic.height & ~1;
+	const size_t row = size_t(f.w) * 2, y_bytes = row * f.h;
+	f.pixels.resize(y_bytes + row * (f.h / 2));
+	uint8_t* dst = f.pixels.data();
+	for (int y = 0; y < f.h; y++) memcpy(dst + size_t(y) * row, pic.y + size_t(y) * pic.pitch, row);
+	dst += y_bytes;
+	for (int y = 0; y < f.h / 2; y++) memcpy(dst + size_t(y) * row, pic.uv + size_t(y) * pic.pitch, row);
+	f.gpu = f.hdr = true;
+	f.high = high;
+}
+
+void Player::planes_from_av(const AVFrame* fr, Frame& f) {
+	f.dw = f.w;
+	f.dh = f.h;
+	f.w = fr->width;
+	f.h = fr->height;
+	const size_t row = size_t(f.w) * 2, y_bytes = row * f.h;
+	f.pixels.resize(y_bytes + row * (f.h / 2));
+	uint8_t* dst = f.pixels.data();
+	for (int y = 0; y < f.h; y++) memcpy(dst + size_t(y) * row, fr->data[0] + size_t(y) * fr->linesize[0], row);
+	uint16_t* uv = reinterpret_cast<uint16_t*>(dst + y_bytes);
+	for (int y = 0; y < f.h / 2; y++) {
+		const uint16_t* u = reinterpret_cast<const uint16_t*>(fr->data[1] + size_t(y) * fr->linesize[1]);
+		const uint16_t* v = reinterpret_cast<const uint16_t*>(fr->data[2] + size_t(y) * fr->linesize[2]);
+		uint16_t* o = uv + size_t(y) * f.w;
+		for (int x = 0; x < f.w / 2; x++) {
+			o[2 * x] = u[x];
+			o[2 * x + 1] = v[x];
+		}
+	}
+	f.gpu = f.hdr = true;
+	f.high = false;  // FFmpeg's 10-bit words are low-aligned
+}
+
 // A hardware picture: two planes (Y, then interleaved UV), 8 or 16-bit samples.
 void Player::hw_to_rgba(const HwDecoder::Picture& pic, Frame& f) {
 	if (pic.ten_bit && hw_shift_ < 0) {
@@ -876,6 +928,16 @@ void Player::hw_to_rgba(const HwDecoder::Picture& pic, Frame& f) {
 		}
 		hw_shift_ = max > 1023 ? 6 : 0;
 		dlog("player: 10-bit pictures, samples in the %s bits", hw_shift_ ? "high" : "low");
+	}
+	if (hdr_output_ && hdr_gpu_ && hdr_capable() && pic.ten_bit) {
+		planes_from_hw(pic, f, hw_shift_ == 6);
+		return;
+	}
+	if (pic.ten_bit && sdr10_gpu() && (pic.width & 1) == 0 && (pic.height & 1) == 0) {
+		// 10-bit SDR: the GPU converts the planes (Nuvio's p010_sdr pipeline), the CPU only hands them over
+		planes_from_hw(pic, f, hw_shift_ == 6);
+		f.hdr = false;
+		return;
 	}
 	YuvPicture yp;
 	yp.y = pic.y;
@@ -894,6 +956,20 @@ void Player::hw_to_rgba(const HwDecoder::Picture& pic, Frame& f) {
 	if (!hw_sws_) return;
 	const uint8_t* src[4] = {pic.y, pic.uv, nullptr, nullptr};
 	int src_stride[4] = {pic.pitch, pic.pitch, 0, 0};
+	if (pic.ten_bit && hw_shift_ == 0) {
+		// swscale's P010 has its 10 bits in the high end of each word; these are in the low end: move them up
+		// (read as P010 as they are, the picture came out dark and green)
+		const size_t words_per_row = size_t(pic.pitch) / 2, rows = size_t(pic.height) + size_t(pic.height) / 2;
+		p010_tmp_.resize(words_per_row * 2 * rows);
+		uint16_t* d = reinterpret_cast<uint16_t*>(p010_tmp_.data());
+		const uint16_t* y = reinterpret_cast<const uint16_t*>(pic.y);
+		for (size_t i = 0; i < words_per_row * size_t(pic.height); i++) d[i] = uint16_t(y[i] << 6);
+		const uint16_t* uv = reinterpret_cast<const uint16_t*>(pic.uv);
+		uint16_t* du = d + words_per_row * size_t(pic.height);
+		for (size_t i = 0; i < words_per_row * (size_t(pic.height) / 2); i++) du[i] = uint16_t(uv[i] << 6);
+		src[0] = p010_tmp_.data();
+		src[1] = p010_tmp_.data() + words_per_row * 2 * size_t(pic.height);
+	}
 	uint8_t* dst[4] = {f.pixels.data(), nullptr, nullptr, nullptr};
 	int dst_stride[4] = {f.w * 4, 0, 0, 0};
 	sws_scale(hw_sws_, src, src_stride, 0, pic.height, dst, dst_stride);
@@ -1174,8 +1250,9 @@ void Player::update_buffering() {
 		// The download fell behind: wait longer this time.
 		const int last = int(sizeof(kBufferTargets) / sizeof(kBufferTargets[0])) - 1;
 		if (stalls_ < last) stalls_++;
-		dlog("player: the stream fell behind (stop %d); buffering %.0f s before going on", ++stall_count_,
-		     std::max(kBufferTargets[stalls_], start_target_));
+		dlog("player: the stream fell behind (stop %d); buffering %.0f s before going on (video %d packets %.1f s, audio %d packets %.1f s)",
+		     ++stall_count_, std::max(kBufferTargets[stalls_], start_target_), int(vq_.count()), vq_.duration(), int(aq_.count()),
+		     aq_.duration());
 		buffering_ = true;
 		buffer_percent_ = 0;
 		apply_run_state();
@@ -1256,6 +1333,12 @@ const Player::Picture* Player::present() {
 			pic_.w = current_.w;
 			pic_.h = current_.h;
 			pic_.hdr = current_.hdr;
+			pic_.gpu = current_.gpu;
+			pic_.high_aligned = current_.high;
+			pic_.hlg = colors_ == YuvColors::Hlg;
+			pic_.bt601 = colors_ == YuvColors::Bt601;
+			pic_.dw = current_.gpu ? current_.dw : current_.w;
+			pic_.dh = current_.gpu ? current_.dh : current_.h;
 			out = &pic_;
 			fq_cv_.notify_all();
 		}

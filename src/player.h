@@ -14,6 +14,8 @@
 #include <thread>
 #include <vector>
 
+struct AVFrame;
+
 #include "hwdec_ps5.h"
 #include "netstream.h"
 #include "subtitles.h"
@@ -78,7 +80,19 @@ public:
 		const uint8_t* rgba = nullptr;  // hdr: 32-bit words, 10 bits per colour (yuv_convert.h), BT.2020 PQ
 		int w = 0, h = 0;
 		bool hdr = false;
+		// gpu: the picture as the decoder made it, for the HDR pass to convert (as PS5MC's renderer does): rgba
+		// holds the Y plane (w x h, 16-bit words) and then the UV plane (w/2 x h/2, interleaved 16-bit pairs).
+		// w, h are the planes' size; dw, dh the size to show it at (fitted to the screen).
+		bool gpu = false;
+		bool high_aligned = false;  // the 10-bit samples sit in the high bits of each word (else the low bits)
+		bool hlg = false;
+		bool bt601 = false;  // gpu without hdr: SDR planes for the video pass; which matrix
+		int dw = 0, dh = 0;
 	};
+	// The HDR pass cannot take planes (the graphics driver refused them): HDR pictures are made on the CPU instead.
+	void set_hdr_gpu(bool on) { hdr_gpu_ = on; }
+	// 10-bit SDR pictures (BT.709/601) go as planes to the GPU, which converts them (Nuvio's way); off: the CPU does.
+	void set_sdr_gpu(bool on) { sdr_gpu_ = on; }
 	// The screen is (or is no longer) in HDR: from then on, HDR10 and HLG pictures are made for the HDR output,
 	// without tone mapping. Other pictures stay SDR.
 	void set_hdr_output(bool on) { hdr_output_ = on; }
@@ -92,6 +106,7 @@ public:
 	// Every 30 s while playing: frame rate shown, drops, buffer, decoder (to the log).
 	void log_stats();
 	bool too_heavy() const { return too_heavy_; }
+	double fps() const { return fps_; }  // the video's frame rate (0 until known)
 	// How the colours are treated ("HDR10", "HLG", "Dolby Vision 5"...), and a warning when they cannot be right.
 	const std::string& colour_label() const { return colour_label_; }
 	const std::string& colour_warning() const { return colour_warning_; }
@@ -127,6 +142,8 @@ private:
 	struct Frame {
 		std::vector<uint8_t> pixels;  // RGBA, or (hdr) one 32-bit 10-bit word per pixel
 		bool hdr = false;
+		bool gpu = false, high = false;
+		int dw = 0, dh = 0;
 		int w = 0, h = 0;
 		double pts = 0;
 		int serial = 0;
@@ -143,6 +160,14 @@ private:
 	bool fast_convert(const YuvPicture& pic, Frame& f);
 	YuvColors colors_ = YuvColors::Bt709;  // of the video being played
 	std::atomic<bool> hdr_output_{false};
+	std::atomic<bool> hdr_gpu_{true};
+	std::atomic<bool> sdr_gpu_{true};
+	bool sdr10_gpu() const {
+		return sdr_gpu_ && (colors_ == YuvColors::Bt709 || colors_ == YuvColors::Bt601) && !(hdr_output_ && hdr_capable());
+	}
+	std::vector<uint8_t> p010_tmp_;  // low-aligned 10-bit words moved up for swscale's P010
+	void planes_from_hw(const HwDecoder::Picture& pic, Frame& f, bool high);
+	void planes_from_av(const AVFrame* frame, Frame& f);
 	std::string colour_label_, colour_warning_;
 	void audio_thread();
 	void fail(const std::string& msg);

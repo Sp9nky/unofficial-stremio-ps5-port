@@ -4,6 +4,7 @@
 
 #include "chrome.hpp"
 #include "hdr_out.hpp"
+#include "vrr.hpp"
 #include "core/input.hpp"
 #include "dynamic_font.hpp"
 #include "gfx/renderer.hpp"
@@ -188,6 +189,7 @@ int main()
 
         // HDR: the console's scan-out follows what is playing (an HDR10 or HLG video on an HDR link); decided
         // before the frame is built, so the shell knows whether the video goes through the HDR pass.
+        sx::vrr::update(session.vrr_enabled(), session.video_fps());
         session.set_hdr_scanout(sx::hdr::update(session.hdr_wanted()));
         {
             static unsigned hdr_status_seen = 0;
@@ -205,9 +207,18 @@ int main()
         renderer.backdrop(backdrop);
         renderer.draw(list);
         // In HDR the frame is drawn through the HDR pass; otherwise it is the normal SDR present.
+        sx::hdr::VideoPlanes planes;
+        planes.y = session.video_plane_y;
+        planes.uv = session.video_plane_uv;
+        planes.w = session.video_plane_w;
+        planes.h = session.video_plane_h;
+        planes.high_aligned = session.video_high;
+        planes.hlg = session.video_hlg;
+        const bool use_planes = session.video_hdr && session.video_gpu && planes.y != 0;
         if (!(sx::hdr::scanout_hdr() &&
-              sx::hdr::present(renderer, display.width(), display.height(), session.video_hdr ? session.video_texture_hdr : 0,
-                               session.hdr_rect)))
+              sx::hdr::present(renderer, display.width(), display.height(),
+                               session.video_hdr && !session.video_gpu ? session.video_texture_hdr : 0,
+                               use_planes ? &planes : nullptr, session.hdr_rect)))
         {
             if (sx::hdr::scanout_hdr())
             {
@@ -217,6 +228,7 @@ int main()
             }
             renderer.present(0, display.width(), display.height());
         }
+        sx::vrr::pace(); // on a VRR link the display refreshes when we present: wait for the next tick
         if (!display.swap())
         {
             sys::log("[SX] fatal: swap failed at frame %llu", static_cast<unsigned long long>(frames));

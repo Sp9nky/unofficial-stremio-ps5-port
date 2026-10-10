@@ -89,11 +89,13 @@ class Shell
     float watch_t_ = 0.0f;   // seconds since the launch screen came up
     float typing_hold_ = 0.0f; // the keyboard's last button presses are not ours
     bool was_watching_ = false;
+    bool rebooting_ = false; // the boot animation is back, waiting for the Board after the sign-in screen
     enum class Layer
     {
         none,
         picker,
         editor,
+        sign_in, // the sign-in screen before the Board (no account: at start-up, or after the profile picked then)
     };
     Layer layer_ = Layer::none;
     ProfilesState pstate_;
@@ -102,7 +104,8 @@ class Shell
     int edit_index_ = -1;
     std::string edit_id_;
     unsigned profiles_seen_ = 0;
-    hui::tween::Spring pfocus_, pick_t_, edit_t_;
+    hui::tween::Spring pfocus_, pick_t_, edit_t_, signin_t_;
+    std::vector<WallTile> wall_; // the sign-in screen's posters, each fading in where it arrives
     // The pop-ups fade in and out.
     hui::tween::Spring dropdown_t_, sign_in_t_, toast_t_, update_t_;
     // The cursor ring of each dialog glides between rows, and the update bar follows its value.

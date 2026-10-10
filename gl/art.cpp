@@ -1,10 +1,12 @@
 #include "art.hpp"
 
+#include "gpu_upload.hpp"
 #include "http.h"
 #include "util.h"
 
 #include <atomic>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -39,6 +41,7 @@ constexpr int kBackdropMin = 1920, kBackdropMax = 2880;
 constexpr int kThumbW = 320;
 constexpr int kIconSize = 192;
 constexpr int kQrMin = 400;
+constexpr int kWallW = 216; // the sign-in's wall draws its posters 216 x 324 (ui/overlays.cpp)
 
 // PNG and JPEG through stb_image; WebP (some addons serve posters as it) through libwebp.
 bool decode(const std::string &data, std::vector<unsigned char> &px, int &w, int &h)
@@ -267,44 +270,62 @@ void to_string_sink(void *context, void *data, int size)
     static_cast<std::string *>(context)->append(static_cast<const char *>(data), static_cast<std::size_t>(size));
 }
 
-// How far apart two pictures are (0..255): the average difference of their brightness on a 32 x 18 grid.
+// How far apart two pictures are (0..255): the average difference of their brightness on a 32 x 18 grid of areas
+// (each cell the mean of the pixels in it). Single pixels (as this once compared) are thrown by grain and
+// compression noise: two copies of the same wallpaper measured 4.9 and 5.6 that way and 0.1 by areas, while
+// different artwork measures 30 and more either way.
 float luma_distance(const std::vector<unsigned char> &a, int aw, int ah, const std::vector<unsigned char> &b, int bw, int bh)
 {
-    const auto luma = [](const std::vector<unsigned char> &p, int w, int h, int x, int y) {
-        const std::size_t i = (static_cast<std::size_t>(y) * w + x) * 4;
-        (void)h;
-        return (p[i] * 299 + p[i + 1] * 587 + p[i + 2] * 114) / 1000;
-    };
-    long sum = 0;
-    for (int gy = 0; gy < 18; ++gy)
-        for (int gx = 0; gx < 32; ++gx)
+    const auto cells = [](const std::vector<unsigned char> &p, int w, int h, float *out) {
+        double sum[32 * 18] = {};
+        int count[32 * 18] = {};
+        const int step = std::max(1, w / 640); // a few hundred thousand pixels are plenty for the means
+        for (int y = 0; y < h; y += step)
         {
-            const float fx = (static_cast<float>(gx) + 0.5f) / 32.0f, fy = (static_cast<float>(gy) + 0.5f) / 18.0f;
-            sum += std::abs(luma(a, aw, ah, static_cast<int>(fx * aw), static_cast<int>(fy * ah)) -
-                            luma(b, bw, bh, static_cast<int>(fx * bw), static_cast<int>(fy * bh)));
+            const int cy = std::min(17, y * 18 / h);
+            const unsigned char *row = &p[static_cast<std::size_t>(y) * w * 4];
+            for (int x = 0; x < w; x += step)
+            {
+                const int c = cy * 32 + std::min(31, x * 32 / w);
+                const unsigned char *q = row + static_cast<std::size_t>(x) * 4;
+                sum[c] += (q[0] * 299 + q[1] * 587 + q[2] * 114) / 1000.0;
+                ++count[c];
+            }
         }
-    return static_cast<float>(sum) / (32.0f * 18.0f);
+        for (int c = 0; c < 32 * 18; ++c)
+            out[c] = count[c] ? static_cast<float>(sum[c] / count[c]) : 0.0f;
+    };
+    float ca[32 * 18], cb[32 * 18];
+    cells(a, aw, ah, ca);
+    cells(b, bw, bh, cb);
+    float d = 0;
+    for (int c = 0; c < 32 * 18; ++c)
+        d += std::fabs(ca[c] - cb[c]);
+    return d / (32.0f * 18.0f);
 }
 
 // The image host keeps a bigger copy of many wallpapers: the "medium" one is often 1280 wide, the
 // "big" one 3840. Not always the same picture, though: for some titles "big" is other artwork (a poster-like
 // still with the name in it), so it is only taken when it is the picture we already have, bigger.
-void use_bigger_copy(const std::string &url, std::vector<unsigned char> &src, int &w, int &h)
+//
+// When the medium copy is already 1920 wide it is not asked: on 36 popular titles the big copy was then never any
+// bigger (14 of 14), so it was 1-2 MB downloaded for nothing.
+void use_bigger_copy(const std::string &url, std::vector<unsigned char> &src, int &w, int &h, HttpSession &http)
 {
     static const std::string kMedium = "/background/medium/";
     const std::size_t at = url.find(kMedium);
-    if (at == std::string::npos || w >= 2880)
+    if (at == std::string::npos || w >= kBackdropMin)
         return;
     std::string big_url = url;
     big_url.replace(at, kMedium.size(), "/background/big/");
-    const HttpResponse r = http_get(big_url, 40);
+    const HttpResponse r = http.get(big_url, 40);
     if (!r.ok())
         return;
     std::vector<unsigned char> big;
     int bw = 0, bh = 0;
     if (!decode(r.body, big, bw, bh) || bw <= w || bh <= 0)
         return;
-    if (luma_distance(src, w, h, big, bw, bh) < 4.0f)
+    if (luma_distance(src, w, h, big, bw, bh) < 3.0f)
     {
         src.swap(big);
         w = bw;
@@ -314,7 +335,7 @@ void use_bigger_copy(const std::string &url, std::vector<unsigned char> &src, in
 
 bool opaque_kind(ArtKind kind)
 {
-    return kind == ArtKind::poster || kind == ArtKind::backdrop || kind == ArtKind::thumb;
+    return kind == ArtKind::poster || kind == ArtKind::backdrop || kind == ArtKind::thumb || kind == ArtKind::wall;
 }
 
 const char *suffix(ArtKind kind)
@@ -331,6 +352,8 @@ const char *suffix(ArtKind kind)
         return "i";
     case ArtKind::qr:
         return "q";
+    case ArtKind::wall:
+        return "w";
     }
     return "x";
 }
@@ -341,6 +364,7 @@ bool TexCache::init(const std::string &dir, hui::gfx::Renderer *renderer, int wo
 {
     dir_ = dir;
     renderer_ = renderer;
+    gpu::prepare(); // the GL thread: the copy shader is ready before the first picture
     make_dirs(dir_);
     stopping_ = false;
     for (int i = 0; i < workers; ++i)
@@ -361,6 +385,29 @@ void TexCache::shutdown()
     threads_.clear();
 }
 
+// A better copy of the same picture where the host has one. metahub's "small" poster is 300 x 450; a card on a 4K
+// screen is about 464 pixels wide, so it was stretched by half again and looked soft. Its "medium" one is 500 x 750
+// and is cut to 480 x 720, drawn at about its own size.
+std::string better_url(const std::string &url, ArtKind kind)
+{
+    static const std::string kSmall = "metahub.space/poster/small/";
+    if (kind != ArtKind::poster && kind != ArtKind::wall)
+        return url;
+    const std::size_t at = url.find(kSmall);
+    if (at == std::string::npos)
+        return url;
+    std::string out = url;
+    out.replace(at, kSmall.size(), "metahub.space/poster/medium/");
+    return out;
+}
+
+std::string host_of(const std::string &url)
+{
+    const std::size_t a = url.find("://");
+    const std::size_t from = a == std::string::npos ? 0 : a + 3;
+    return url.substr(from, url.find('/', from) - from);
+}
+
 std::string TexCache::key_for(const std::string &url, ArtKind kind) const
 {
     char name[64];
@@ -369,10 +416,11 @@ std::string TexCache::key_for(const std::string &url, ArtKind kind) const
     return dir_ + name;
 }
 
-std::uint32_t TexCache::get(const std::string &url, ArtKind kind)
+std::uint32_t TexCache::get(const std::string &url0, ArtKind kind)
 {
-    if (url.empty() || (!starts_with(url, "http://") && !starts_with(url, "https://")))
+    if (url0.empty() || (!starts_with(url0, "http://") && !starts_with(url0, "https://")))
         return 0;
+    const std::string url = better_url(url0, kind);
     const std::string key = key_for(url, kind);
     Entry &e = entries_[key];
     e.used = clock_;
@@ -383,15 +431,70 @@ std::uint32_t TexCache::get(const std::string &url, ArtKind kind)
     e.pending = true;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        queue_.push_back(Job{url, key, kind});
+        // Already on its way to disk (warm): it goes on to the GPU, and to the front.
+        bool found = false;
+        for (Job &j : queue_)
+            if (j.key == key)
+            {
+                j.upload = true;
+                j.priority = 0;
+                found = true;
+            }
+        auto in = inflight_.find(key);
+        if (!found && in != inflight_.end())
+        {
+            in->second = true;
+            found = true;
+        }
+        if (!found)
+        {
+            Job job;
+            job.url = url;
+            job.key = key;
+            job.kind = kind;
+            job.host = host_of(url);
+            queue_.push_back(job);
+        }
     }
     cv_.notify_one();
     return 0;
 }
 
+void TexCache::warm(const std::string &url0, ArtKind kind)
+{
+    if (url0.empty() || (!starts_with(url0, "http://") && !starts_with(url0, "https://")))
+        return;
+    const std::string url = better_url(url0, kind);
+    const std::string key = key_for(url, kind);
+    const auto it = entries_.find(key);
+    if (it != entries_.end() && (it->second.id != 0 || it->second.pending || it->second.failed))
+        return;
+    if (!warmed_.insert(key).second)
+        return; // asked before: on disk, or on its way
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        Job job;
+        job.url = url;
+        job.key = key;
+        job.kind = kind;
+        job.priority = 1;
+        job.upload = false;
+        job.host = host_of(url);
+        queue_.push_back(job);
+    }
+    cv_.notify_one();
+}
+
+bool TexCache::cached(const std::string &url0, ArtKind kind) const
+{
+    const std::string key = key_for(better_url(url0, kind), kind);
+    const auto it = entries_.find(key);
+    return (it != entries_.end() && it->second.id != 0) || file_exists(key);
+}
+
 std::uint32_t TexCache::peek(const std::string &url, ArtKind kind) const
 {
-    const auto it = entries_.find(key_for(url, kind));
+    const auto it = entries_.find(key_for(better_url(url, kind), kind));
     return it == entries_.end() ? 0 : it->second.id;
 }
 
@@ -414,7 +517,34 @@ bool TexCache::pump(int max_uploads)
             e.failed = true;
             continue;
         }
-        e.id = renderer_->batch().create_texture(r.w, r.h, r.pixels.data());
+        // Through the GPU (gpu_upload.hpp): the frame does not wait for the driver to tile the picture.
+        const double t0 = now_seconds();
+        const char *how = "through the GPU";
+        e.id = direct_faster_ ? 0 : gpu::texture_from_rgba(r.w, r.h, r.pixels.data());
+        if (e.id == 0)
+        {
+            e.id = renderer_->batch().create_texture(r.w, r.h, r.pixels.data());
+            how = "directly";
+        }
+        const double ms = (now_seconds() - t0) * 1000.0;
+        if (uploads_logged_ < 3 || ms > 25.0)
+        {
+            ++uploads_logged_;
+            dlog("art: a %dx%d picture went up %s in %.1f ms", r.w, r.h, how, ms);
+        }
+        // Once, for the record: what the usual upload of the same big picture costs on this console.
+        if (!upload_compared_ && r.w * r.h >= 1920 * 1080 && how[0] == 't' && ++big_uploads_ >= 2)
+        {
+            upload_compared_ = true;
+            const double t1 = now_seconds();
+            const std::uint32_t test = renderer_->batch().create_texture(r.w, r.h, r.pixels.data());
+            const double direct = (now_seconds() - t1) * 1000.0;
+            glDeleteTextures(1, &test);
+            // Measured, not assumed: if the usual upload is clearly the faster one on this console, it is used from now on.
+            direct_faster_ = direct < ms * 0.8;
+            dlog("art: the same %dx%d picture uploaded directly took %.1f ms (through the GPU %.1f ms): %s", r.w, r.h, direct, ms,
+                 direct_faster_ ? "uploading directly from now on" : "keeping the GPU copy");
+        }
         e.bytes = r.pixels.size();
         e.used = clock_;
         bytes_ += e.bytes;
@@ -445,49 +575,144 @@ bool TexCache::trim(std::size_t budget)
     return deleted;
 }
 
+// What a worker takes next: what is wanted on screen before what is fetched ahead, the newest first, nothing that
+// waits for a retry or for its host to come back, and no more than 4 of the 6 workers on one host while another
+// host has work waiting (a slow or dead host must not hold up the rest, as a browser limits connections per host).
+int TexCache::choose(double now) const
+{
+    constexpr int kPerHost = 4;
+    int best = -1, best_any = -1;
+    for (int i = static_cast<int>(queue_.size()) - 1; i >= 0; --i)
+    {
+        const Job &j = queue_[static_cast<std::size_t>(i)];
+        if (j.not_before > now)
+            continue;
+        const auto down = host_down_until_.find(j.host);
+        if (down != host_down_until_.end() && down->second > now)
+            continue;
+        if (best_any < 0 || j.priority < queue_[static_cast<std::size_t>(best_any)].priority)
+            best_any = i;
+        const auto active = host_active_.find(j.host);
+        if (active != host_active_.end() && active->second >= kPerHost)
+            continue;
+        if (best < 0 || j.priority < queue_[static_cast<std::size_t>(best)].priority)
+            best = i;
+    }
+    return best >= 0 ? best : best_any;
+}
+
 void TexCache::worker()
 {
+    HttpSession http; // this worker's connections stay open between pictures
     for (;;)
     {
         Job job;
         {
             std::unique_lock<std::mutex> lock(mutex_);
-            cv_.wait(lock, [this] { return stopping_ || !queue_.empty(); });
-            if (stopping_)
-                return;
-            job = queue_.back();
-            queue_.pop_back();
+            for (;;)
+            {
+                if (stopping_)
+                    return;
+                const double now = now_seconds();
+                const int pick = choose(now);
+                if (pick >= 0)
+                {
+                    job = std::move(queue_[static_cast<std::size_t>(pick)]);
+                    queue_.erase(queue_.begin() + pick);
+                    break;
+                }
+                // Nothing can start yet: wait for new work, or for the earliest retry.
+                double next = 0;
+                for (const Job &j : queue_)
+                {
+                    double at = j.not_before;
+                    const auto down = host_down_until_.find(j.host);
+                    if (down != host_down_until_.end())
+                        at = std::max(at, down->second);
+                    if (next == 0 || at < next)
+                        next = at;
+                }
+                if (next > now)
+                    cv_.wait_for(lock, std::chrono::milliseconds(static_cast<long>(std::min(5.0, next - now) * 1000.0) + 1));
+                else
+                    cv_.wait(lock);
+            }
+            inflight_[job.key] = job.upload;
+            ++host_active_[job.host];
         }
         Ready r;
         r.key = job.key;
-        if (!make(job, &r))
+        bool unreachable = false;
+        const Made made = make(job, &r, http, &unreachable);
+        std::unique_lock<std::mutex> lock(mutex_);
+        --host_active_[job.host];
+        const bool upload = inflight_[job.key];
+        inflight_.erase(job.key);
+        if (made == Made::retry && job.attempts + 1 < 4)
+        {
+            // Again in 3, then 10, then 30 seconds; a host that could not be reached at all rests for 30 seconds.
+            static const double kWait[] = {3.0, 10.0, 30.0};
+            const double now = now_seconds();
+            if (unreachable)
+                host_down_until_[job.host] = now + 30.0;
+            job.not_before = now + kWait[job.attempts];
+            ++job.attempts;
+            job.upload = upload;
+            if (upload)
+                job.priority = 0;
+            queue_.push_back(std::move(job));
+            lock.unlock();
+            cv_.notify_all();
+            continue;
+        }
+        if (!upload)
+            continue; // to disk only: nothing for the GPU
+        if (made != Made::ok)
             r.pixels.clear();
-        std::lock_guard<std::mutex> lock(mutex_);
+        else if (r.pixels.empty())
+        {
+            // It was only checked for on disk (a warm job that get() asked for meanwhile): read it now.
+            lock.unlock();
+            std::string data;
+            if (!read_file(job.key, data) || !decode(data, r.pixels, r.w, r.h))
+                r.pixels.clear();
+            lock.lock();
+        }
         ready_.push_back(std::move(r));
     }
 }
 
-bool TexCache::make(const Job &job, Ready *out)
+TexCache::Made TexCache::make(const Job &job, Ready *out, HttpSession &http, bool *unreachable)
 {
+    if (!job.upload && file_exists(job.key))
+        return Made::ok; // warm, and already on disk
     std::string data;
     if (read_file(job.key, data) && decode(data, out->pixels, out->w, out->h))
-        return true; // already cut: use as it is
+        return Made::ok; // already cut: use as it is
 
-    const HttpResponse r = http_get(job.url, 30);
-    if (!r.ok())
-    {
-        dlog("art: %s: %s", job.url.c_str(), r.describe().c_str());
-        return false;
-    }
     std::vector<unsigned char> src;
     int w = 0, h = 0;
-    if (!decode(r.body, src, w, h) || w <= 0 || h <= 0)
+    if (job.kind == ArtKind::wall)
     {
-        dlog("art: cannot decode %s", job.url.c_str());
-        return false;
+        // From the card's poster: the one on disk, or fetched and cut now (and kept, so the card does not fetch it).
+        Job card = job;
+        card.kind = ArtKind::poster;
+        card.key = key_for(job.url, ArtKind::poster);
+        card.upload = true;
+        Ready poster;
+        const Made made = make(card, &poster, http, unreachable);
+        if (made != Made::ok)
+            return made;
+        src = std::move(poster.pixels);
+        w = poster.w;
+        h = poster.h;
+    }
+    else if (const Made made = fetch(job, http, unreachable, src, w, h); made != Made::ok)
+    {
+        return made;
     }
     if (job.kind == ArtKind::backdrop)
-        use_bigger_copy(job.url, src, w, h);
+        use_bigger_copy(job.url, src, w, h, http);
 
     std::vector<unsigned char> px;
     int ow = 0, oh = 0;
@@ -495,6 +720,9 @@ bool TexCache::make(const Job &job, Ready *out)
     {
     case ArtKind::poster:
         cover(src, w, h, 2, 3, kPosterW, px, ow, oh);
+        break;
+    case ArtKind::wall:
+        cover(src, w, h, 2, 3, kWallW, px, ow, oh);
         break;
     case ArtKind::backdrop:
     {
@@ -535,7 +763,33 @@ bool TexCache::make(const Job &job, Ready *out)
     out->pixels = std::move(px);
     out->w = ow;
     out->h = oh;
-    return true;
+    return Made::ok;
+}
+
+// The picture itself, from its host, decoded.
+TexCache::Made TexCache::fetch(const Job &job, HttpSession &http, bool *unreachable, std::vector<unsigned char> &src,
+                               int &w, int &h)
+{
+    const HttpResponse r = http.get(job.url, 30);
+    if (!r.ok())
+    {
+        dlog("art: %s: %s", job.url.c_str(), r.describe().c_str());
+        if (!r.error.empty())
+        {
+            // No answer: could not resolve, connect or finish in time. Worth another try later.
+            const std::string e = lower(r.error);
+            *unreachable = e.find("resolve") != std::string::npos || e.find("connect") != std::string::npos;
+            return Made::retry;
+        }
+        // Busy or briefly broken (5xx, 408, 429): later. Not there (404, 403, 410...): no.
+        return r.status >= 500 || r.status == 408 || r.status == 429 ? Made::retry : Made::failed;
+    }
+    if (!decode(r.body, src, w, h) || w <= 0 || h <= 0)
+    {
+        dlog("art: cannot decode %s", job.url.c_str());
+        return Made::failed;
+    }
+    return Made::ok;
 }
 
 } // namespace sx

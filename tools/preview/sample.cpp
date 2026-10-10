@@ -239,10 +239,10 @@ bool load_detail(hui::gfx::Renderer &renderer, const std::string &art_dir, Detai
     movie->cast = "Idris Vale, Noor Haddad, Tomas Lindqvist, Wen Zhao, Elena Marchetti";
     movie->stream_heading = "Streams";
     movie->streams = {
-        stream("4K", "Stream Finder", "Northbound.2024.2160p.WEB-DL.DDP5.1.HDR.H265-GRP.mkv", "HDR10  \xC2\xB7  Dolby Atmos",
+        stream("4K", "[RD+] Torrentio", "Northbound.2024.2160p.WEB-DL.DDP5.1.HDR.H265-GRP.mkv", "HDR10  \xC2\xB7  Dolby Atmos",
                "21.3 GB", "212 seeds"),
-        stream("4K", "Debrid Streams", "Northbound 2024 2160p BluRay REMUX HEVC DV", "Dolby Vision  \xC2\xB7  TrueHD", "58.9 GB", ""),
-        stream("1080p", "Stream Finder", "Northbound.2024.1080p.WEB-DL.DDP5.1.H264-GRP.mkv", "", "5.4 GB", "431 seeds"),
+        stream("4K", "[RD+] Torrentio", "Northbound 2024 2160p BluRay REMUX HEVC DV", "Dolby Vision  \xC2\xB7  TrueHD", "58.9 GB", ""),
+        stream("1080p", "[RD download] Torrentio", "Northbound.2024.1080p.WEB-DL.DDP5.1.H264-GRP.mkv", "", "5.4 GB", "431 seeds"),
         stream("1080p", "Debrid Streams", "Northbound.2024.1080p.BluRay.x264-GRP", "", "9.8 GB", ""),
         stream("1080p", "This Console", "/media/movies/Northbound (2024)/Northbound (2024).mkv", "Local file", "7.1 GB", ""),
         stream("720p", "Stream Finder", "Northbound.2024.720p.WEBRip.x264-GRP.mp4", "", "2.1 GB", "598 seeds"),

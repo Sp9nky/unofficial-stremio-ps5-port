@@ -69,6 +69,10 @@ std::string plain_cue(const std::string &rml)
                 out += '"';
             else if (entity == "&apos;" || entity == "&#39;")
                 out += '\'';
+            else if (entity == "&#123;")
+                out += '{';
+            else if (entity == "&#125;")
+                out += '}';
             else
             {
                 out += rml[i];
@@ -134,7 +138,25 @@ void Session::play_stream(const ::Stream &st, bool transcode)
         say(message, 6.0, true);
     };
     const std::string srv = server();
-    const bool torrent = st.url.empty() && !st.info_hash.empty();
+    // Real-Debrid / Torbox (src/debrid.cpp): a stream they can resolve is turned into a link first and then plays as
+    // a direct link. Without a key nothing here changes.
+    int debrid_season = -1, debrid_episode = -1;
+    if (detail.series)
+        for (const auto &v : d_meta_.videos)
+            if (v.id == d_video_id_)
+            {
+                debrid_season = v.season;
+                debrid_episode = v.episode;
+            }
+    const debrid::Credentials debrid_keys = debrid_creds();
+    const debrid::Service debrid_service = debrid::service_for(st, debrid_keys, debrid_season, debrid_episode);
+    const bool debrid_play = debrid_service != debrid::Service::none;
+    if (st.url.empty() && st.info_hash.empty() && !debrid_play)
+    {
+        refuse("Connect Real-Debrid or Torbox in Settings to play this stream.");
+        return;
+    }
+    const bool torrent = !debrid_play && st.url.empty() && !st.info_hash.empty();
     // Torrents play with the app's own engine, unless Settings says to use the
     // server; transcoding is always the server's.
     const bool builtin = torrent && !transcode && (prefs_.builtin_torrents || srv.empty());
@@ -219,6 +241,8 @@ void Session::play_stream(const ::Stream &st, bool transcode)
             launch.quality += "  \xC2\xB7  " + v.size;
     }
     launch.stages = {"Finding sources", "Connecting to peers", "Filling the buffer", "Starting"};
+    if (debrid_play)
+        launch.stages[1] = std::string("Getting the link from ") + debrid::service_name(debrid_service);
     launch.stage = 0;
     launch.progress = -1.0f;
     launch.torrent = torrent;
@@ -248,11 +272,23 @@ void Session::play_stream(const ::Stream &st, bool transcode)
     launch_cancel_ = cancel;
     const ::Stream s = st;
     bg<Res>(
-        [s, srv, torrent, builtin, transcode, season, episode, cancel]() {
+        [s, srv, torrent, builtin, transcode, season, episode, cancel, debrid_play, debrid_keys, debrid_service]() {
             Res r;
             std::string media = s.url;
             if (!s.url.empty())
                 r.headers = s.request_headers;
+            if (debrid_play)
+            {
+                const debrid::Outcome o = debrid::resolve(s, debrid_keys, season, episode, cancel.get());
+                if (!o.ok())
+                {
+                    dlog("debrid: %s: %s %s", debrid::service_name(debrid_service), o.status.c_str(), o.detail.c_str());
+                    r.error = cancel->load() ? "cancelled" : debrid::explain(o, debrid_service);
+                    return r;
+                }
+                dlog("debrid: %s link for %s (%lld MB)", debrid::service_name(debrid_service), o.filename.c_str(), o.size >> 20);
+                media = o.url;
+            }
             if (builtin)
             {
                 // The app's own engine: start it, wait for the file list (the peers
@@ -274,7 +310,7 @@ void Session::play_stream(const ::Stream &st, bool transcode)
                 }
                 int idx = s.file_idx;
                 if (idx < 0 || static_cast<std::size_t>(idx) >= files.size())
-                    idx = bt::Engine::guess_file(files, season, episode);
+                    idx = bt::Engine::guess_file(files, season, episode, s.file_must_include);
                 if (idx < 0)
                 {
                     r.error = "This torrent has no video file.";
@@ -354,16 +390,21 @@ void Session::play_stream(const ::Stream &st, bool transcode)
                             r.error = "Your streaming server: " + h.describe();
                         return r;
                     }
-                    if (idx < 0)
+                    if (idx < 0 && s.file_must_include.empty())
                     {
                         const json j = json::parse(h.body, nullptr, false);
                         idx = static_cast<int>(jnum(j, "guessedFileIdx", 0));
                     }
                 }
+                // No fileIdx but fileMustInclude: as stremio-core does, the URL says -1 and carries the regexes as "f"
+                // parameters; the server picks the file that matches them.
                 media = srv + "/" + s.info_hash + "/" + std::to_string(idx);
                 std::string query;
                 for (const auto &x : sources)
                     query += (query.empty() ? "?tr=" : "&tr=") + url_encode(x);
+                if (idx < 0)
+                    for (const auto &x : s.file_must_include)
+                        query += (query.empty() ? "?f=" : "&f=") + url_encode(x);
                 media += query;
                 r.file_idx = idx;
                 r.headers.clear();
@@ -430,7 +471,8 @@ void Session::watch_start(const std::string &url, const std::vector<std::string>
     w_sub_delay_ = 0;
     subtitle_shown_.clear();
     w_last_save_ = now_seconds();
-    w_last_saved_pos_ = start;
+    w_last_saved_pos_ = -1;
+    library_begin();
     w_info_until_ = now_seconds() + kInfoSeconds;
     launch.stage = 1;
     watch_load_addon_subtitles();
@@ -467,6 +509,7 @@ void Session::torrent_stats_poll()
         double peers = 0, speed = 0, progress = -1;
         int known = -1; // the app's own engine only
         bool has_meta = false;
+        std::string log; // the server's stats.json names, for the log
     };
     bg<Stats>(
         [url]() {
@@ -480,6 +523,13 @@ void Session::torrent_stats_poll()
                 s.progress = es.file_progress;
                 s.known = es.known_peers;
                 s.has_meta = es.has_metadata;
+                char b[256];
+                snprintf(b, sizeof b,
+                         "peers=%d unchoked=%d queued=%d known=%d swarmPaused=%d peerSearchRunning=%d stable=%d "
+                         "downloadSpeed=%.0f streamProgress=%.3f",
+                         es.peers, es.unchoked, es.queued, es.known_peers, es.swarm_paused, es.peer_search_running,
+                         es.stable, es.download_rate, es.file_progress);
+                s.log = b;
                 return s;
             }
             const HttpResponse h = http_get(url, 5);
@@ -493,6 +543,13 @@ void Session::torrent_stats_poll()
             s.speed = jnum(j, "downloadSpeed");
             if (j.contains("streamProgress"))
                 s.progress = jnum(j, "streamProgress");
+            char b[256];
+            snprintf(b, sizeof b,
+                     "peers=%.0f unchoked=%.0f queued=%.0f swarmPaused=%d peerSearchRunning=%d downloadSpeed=%.0f "
+                     "streamProgress=%.3f",
+                     s.peers, jnum(j, "unchoked"), jnum(j, "queued"), jbool(j, "swarmPaused"),
+                     jbool(j, "peerSearchRunning"), s.speed, s.progress);
+            s.log = b;
             return s;
         },
         [this, gen](Stats &s) {
@@ -506,6 +563,11 @@ void Session::torrent_stats_poll()
                 t_progress_ = s.progress;
             t_known_ = s.known;
             t_has_meta_ = s.has_meta;
+            if (now_seconds() - t_logged_ >= 10.0)
+            {
+                t_logged_ = now_seconds();
+                dlog("torrent stats: %s", s.log.c_str());
+            }
         });
 }
 
@@ -677,6 +739,11 @@ void Session::watch_update()
         w_last_save_ = now;
         watch_save_progress(false);
     }
+    if (w_started_ && st == Player::State::Playing && now - w_lib_tick_ >= 1.0)
+    {
+        w_lib_tick_ = now;
+        library_time_changed(false);
+    }
     if (!w_colour_warned_ && !player_.colour_warning().empty() && player_.state() == Player::State::Playing)
     {
         w_colour_warned_ = true;
@@ -702,10 +769,82 @@ void Session::upload_video()
         // it is skipped: the SDR pictures take over.
         if (!hdr_scanout_)
             return;
+        if (pic->gpu)
+        {
+            // The decoder's planes, as they are (the pass converts them: native size, no CPU work)
+            hdr::VideoPlanes planes;
+            planes.y = video_plane_y;
+            planes.uv = video_plane_uv;
+            planes.w = video_plane_w;
+            planes.h = video_plane_h;
+            const std::size_t y_bytes = static_cast<std::size_t>(pic->w) * static_cast<std::size_t>(pic->h) * 2;
+            if (!hdr::planes_upload(&planes, pic->w, pic->h, pic->rgba, pic->rgba + y_bytes))
+            {
+                // the driver refused the planes: from now on the CPU makes the 10-bit pictures
+                player_.set_hdr_gpu(false);
+                video_hdr = false;
+                return;
+            }
+            video_plane_y = planes.y;
+            video_plane_uv = planes.uv;
+            video_plane_w = planes.w;
+            video_plane_h = planes.h;
+            video_high = pic->high_aligned;
+            video_hlg = pic->hlg;
+            video_disp_w = pic->dw;
+            video_disp_h = pic->dh;
+            video_gpu = true;
+            video_hdr = true;
+            return;
+        }
+        video_gpu = false;
         video_hdr = hdr::video_upload(&video_texture_hdr, &video_hdr_w, &video_hdr_h, pic->w, pic->h, pic->rgba);
+        video_disp_w = pic->w;
+        video_disp_h = pic->h;
         return;
     }
     video_hdr = false;
+    if (pic->gpu)
+    {
+        // 10-bit SDR planes, converted on the GPU into an ordinary texture (Nuvio's p010_sdr pipeline)
+        hdr::VideoPlanes planes;
+        planes.y = video_plane_y;
+        planes.uv = video_plane_uv;
+        planes.w = video_plane_w;
+        planes.h = video_plane_h;
+        const std::size_t y_bytes = static_cast<std::size_t>(pic->w) * static_cast<std::size_t>(pic->h) * 2;
+        planes.high_aligned = pic->high_aligned;
+        if (!hdr::planes_upload(&planes, pic->w, pic->h, pic->rgba, pic->rgba + y_bytes))
+        {
+            player_.set_sdr_gpu(false); // the driver refused the planes: the CPU makes these pictures from now on
+            return;
+        }
+        video_plane_y = planes.y;
+        video_plane_uv = planes.uv;
+        video_plane_w = planes.w;
+        video_plane_h = planes.h;
+        if (!hdr::sdr_convert(&sdr_target_, planes, pic->dw, pic->dh, pic->bt601))
+        {
+            player_.set_sdr_gpu(false);
+            return;
+        }
+        if (video_texture != 0 && !video_sdr_gpu_)
+        {
+            const GLuint old = video_texture;
+            glDeleteTextures(1, &old);
+        }
+        video_texture = sdr_target_.texture;
+        video_w = pic->dw;
+        video_h = pic->dh;
+        video_sdr_gpu_ = true;
+        return;
+    }
+    if (video_sdr_gpu_)
+    {
+        video_texture = 0; // it is the GPU target's: that keeps it
+        video_w = video_h = 0;
+        video_sdr_gpu_ = false;
+    }
     if (video_texture == 0 || pic->w != video_w || pic->h != video_h)
     {
         if (video_texture != 0)
@@ -721,6 +860,16 @@ void Session::upload_video()
     {
         renderer_->batch().update_texture(video_texture, pic->w, pic->h, pic->rgba);
     }
+}
+
+bool Session::vrr_enabled() const
+{
+    return prefs_.match_refresh;
+}
+
+double Session::video_fps() const
+{
+    return watching && !launch_open && player_.state() == Player::State::Playing ? player_.fps() : 0.0;
 }
 
 bool Session::hdr_wanted() const
@@ -740,7 +889,7 @@ void Session::set_hdr_scanout(bool on)
     hdr_scanout_ = on;
     player_.set_hdr_output(on); // from the next picture on, HDR video is made for the HDR output (or tone mapped again)
     if (!on)
-        video_hdr = false;
+        video_hdr = video_gpu = false;
 }
 
 void Session::watch_stop(bool ended)
@@ -763,6 +912,13 @@ void Session::watch_stop(bool ended)
     t_visible_ = false;
     playing = PlayerState();
     subtitle_shown_.clear();
+    if (video_sdr_gpu_)
+    {
+        hdr::sdr_release(&sdr_target_);
+        video_texture = 0;
+        video_w = video_h = 0;
+        video_sdr_gpu_ = false;
+    }
     if (video_texture != 0)
     {
         const GLuint old = video_texture;
@@ -777,7 +933,14 @@ void Session::watch_stop(bool ended)
         video_texture_hdr = 0;
         video_hdr_w = video_hdr_h = 0;
     }
-    video_hdr = false;
+    if (video_plane_y != 0)
+    {
+        const GLuint old[2] = {video_plane_y, video_plane_uv};
+        glDeleteTextures(2, old);
+        video_plane_y = video_plane_uv = 0;
+        video_plane_w = video_plane_h = 0;
+    }
+    video_hdr = video_gpu = false;
     // Back on the title's page: what was watched shows there.
     if (d_open_)
         for (std::size_t i = 0; i < detail.episodes.size() && i < d_season_videos_.size(); ++i)
@@ -810,65 +973,209 @@ void Session::watch_save_progress(bool final, bool force_finished)
         watched_.insert(w_video_id_);
     save_progress();
 
-    const double delta = w_last_saved_pos_ >= 0 ? std::max(0.0, std::min(pos - w_last_saved_pos_, kSaveEvery * 2)) : 0;
-    w_last_saved_pos_ = pos;
-
     if (!signed_in())
         return;
-    const std::string now = iso8601_now();
-    json item;
-    const auto it = library_.find(w_item_.id);
-    if (it != library_.end())
-    {
-        item = it->second;
-    }
+    if (final)
+        library_finish(finished);
     else
+        library_time_changed(false);
+}
+
+// ---------------------------------------------------------------------------
+// The account's library item, the way stremio-core's Player model keeps it: TimeChanged once a second, Seek, the
+// video changing, Unload; the item is sent to the account at most every 90 seconds while playing (and at the end).
+
+namespace
+{
+constexpr double kPushEvery = 90.0;       // core: PUSH_TO_LIBRARY_EVERY
+constexpr double kWatchedThreshold = 0.7; // core: WATCHED_THRESHOLD_COEF
+constexpr double kCreditsThreshold = 0.9; // core: CREDITS_THRESHOLD_COEF
+} // namespace
+
+json &Session::library_ensure(const Item &item)
+{
+    auto it = library_.find(item.id);
+    if (it == library_.end())
     {
-        item = json{{"_id", w_item_.id},
-                    {"name", w_item_.name},
-                    {"type", w_item_.type},
-                    {"poster", w_item_.poster},
-                    {"posterShape", "poster"},
-                    {"removed", true},
-                    {"temp", true},
-                    {"_ctime", now},
-                    {"state", json::object()},
-                    {"behaviorHints", {{"defaultVideoId", nullptr}, {"featuredVideoId", nullptr}, {"hasScheduledVideos", false}}}};
+        const std::string now = iso8601_now();
+        it = library_
+                 .emplace(item.id,
+                          json{{"_id", item.id},
+                               {"name", item.name},
+                               {"type", item.type},
+                               {"poster", item.poster},
+                               {"posterShape", "poster"},
+                               {"removed", true},
+                               {"temp", true},
+                               {"_ctime", now},
+                               {"state", json::object()},
+                               {"behaviorHints",
+                                {{"defaultVideoId", nullptr}, {"featuredVideoId", nullptr}, {"hasScheduledVideos", false}}}})
+                 .first;
     }
+    json &state = it->second["state"];
+    if (!state.is_object())
+        state = json::object();
+    for (const auto &kv : {std::pair<const char *, json>{"timeWatched", 0},
+                           {"overallTimeWatched", 0},
+                           {"timesWatched", 0},
+                           {"flaggedWatched", 0},
+                           {"timeOffset", 0},
+                           {"duration", 0},
+                           {"noNotif", false},
+                           {"watched", nullptr}})
+        if (!state.contains(kv.first))
+            state[kv.first] = kv.second;
+    return it->second;
+}
+
+// A video is selected for playing (core: the item's video_id is the one being watched; a different video starts at 0).
+void Session::library_begin()
+{
+    w_lib_tick_ = 0;
+    w_lib_push_ = now_seconds();
+    w_last_saved_pos_ = -1;
+    w_lib_watched_sent_ = false;
+    if (!signed_in() || w_item_.id.empty())
+        return;
+    json &state = library_ensure(w_item_)["state"];
+    if (jstr(state, "video_id") != w_video_id_)
+    {
+        state["video_id"] = w_video_id_;
+        state["timeOffset"] = 0;
+        state["timeWatched"] = 0; // core: reset together with the offset when the video changes
+    }
+}
+
+void Session::library_time_changed(bool force)
+{
+    const double pos = player_.position(), dur = player_.duration();
+    if (!signed_in() || dur <= 0 || w_item_.id.empty() || pos < 1)
+        return;
+    json &item = library_ensure(w_item_);
     json &s = item["state"];
-    if (!s.is_object())
-        s = json::object();
+    const std::string now = iso8601_now();
+    // Time watched grows with playing time, not with seeks.
+    const double delta = w_last_saved_pos_ >= 0 ? pos - w_last_saved_pos_ : 0;
+    w_last_saved_pos_ = pos;
+    if (delta > 0 && delta < 5)
+    {
+        s["timeWatched"] = static_cast<std::int64_t>(jnum(s, "timeWatched") + delta * 1000);
+        s["overallTimeWatched"] = static_cast<std::int64_t>(jnum(s, "overallTimeWatched") + delta * 1000);
+    }
     s["lastWatched"] = now;
-    s["timeOffset"] = static_cast<std::int64_t>(finished ? 0 : pos * 1000);
+    s["timeOffset"] = static_cast<std::int64_t>(pos * 1000);
     s["duration"] = static_cast<std::int64_t>(dur * 1000);
     s["video_id"] = w_video_id_;
-    s["timeWatched"] = static_cast<std::int64_t>(jnum(s, "timeWatched") + delta * 1000);
-    s["overallTimeWatched"] = static_cast<std::int64_t>(jnum(s, "overallTimeWatched") + delta * 1000);
-    if (!s.contains("timesWatched"))
-        s["timesWatched"] = 0;
-    if (!s.contains("flaggedWatched"))
-        s["flaggedWatched"] = 0;
-    if (!s.contains("noNotif"))
-        s["noNotif"] = false;
-    if (!s.contains("watched"))
-        s["watched"] = nullptr;
-    if (finished && final)
+    // Past the watched threshold: counted once per play, and the account is told (core: send_watched).
+    if (!w_lib_watched_sent_ && pos > dur * kWatchedThreshold)
     {
+        w_lib_watched_sent_ = true;
         s["timesWatched"] = static_cast<int>(jnum(s, "timesWatched")) + 1;
         if (w_item_.type == "movie")
             s["flaggedWatched"] = 1;
+        library_set_watched_bit(s, w_video_id_, true);
+        const std::string key = prefs_.auth_key, id = w_item_.id, type = w_item_.type;
+        bg<bool>([key, id, type]() { return api_send_watched(key, id, type); },
+                 [](bool &ok) { dlog("library: send watched %s", ok ? "ok" : "failed"); });
     }
     item["_mtime"] = now;
-    library_[w_item_.id] = item;
-    library_loaded_ = true;
+    if (force || now_seconds() - w_lib_push_ >= kPushEvery)
+        library_push(force ? "forced" : "every 90 s", w_item_.id);
+}
 
+void Session::library_seek(double target_s)
+{
+    w_last_saved_pos_ = target_s; // the jump does not count as time watched
+    if (!signed_in() || w_item_.id.empty())
+        return;
+    json &s = library_ensure(w_item_)["state"];
+    s["timeOffset"] = static_cast<std::int64_t>(std::max(0.0, target_s) * 1000);
+}
+
+// Unload (or the end): past the credits threshold the item goes on to the next video, offset 0.
+void Session::library_finish(bool force_finished)
+{
+    const double pos = player_.position(), dur = player_.duration();
+    if (!signed_in() || dur <= 0 || w_item_.id.empty())
+        return;
+    json &item = library_ensure(w_item_);
+    json &s = item["state"];
+    const bool credits = force_finished || pos > dur * kCreditsThreshold;
+    s["lastWatched"] = iso8601_now();
+    s["duration"] = static_cast<std::int64_t>(dur * 1000);
+    s["video_id"] = w_video_id_;
+    s["timeOffset"] = static_cast<std::int64_t>(credits ? 0 : pos * 1000);
+    if (credits)
+    {
+        if (!w_lib_watched_sent_)
+        {
+            s["timesWatched"] = static_cast<int>(jnum(s, "timesWatched")) + 1;
+            if (w_item_.type == "movie")
+                s["flaggedWatched"] = 1;
+        }
+        library_set_watched_bit(s, w_video_id_, true);
+        const std::string next = next_episode_id();
+        if (!next.empty())
+        {
+            s["video_id"] = next; // core: NextVideo
+            s["timeWatched"] = 0;
+        }
+    }
+    item["_mtime"] = s["lastWatched"];
+    library_push("stop", w_item_.id);
+}
+
+void Session::library_push(const char *why, const std::string &id)
+{
+    w_lib_push_ = now_seconds();
+    const auto it = library_.find(id);
+    if (it == library_.end() || !signed_in())
+        return;
+    library_loaded_ = true;
+    dlog("library: push %s (%s)", id.c_str(), why);
     const std::string key = prefs_.auth_key;
-    const json changes = json::array({item});
+    const json changes = json::array({it->second});
     bg<ApiResult>([key, changes]() { return api_library_put(key, changes); },
                   [](ApiResult &r) {
                       if (!r.ok)
                           dlog("library put: %s", r.error.c_str());
                   });
+}
+
+// The account's watched field is a bit per video of the series (stremio-core's WatchedField).
+bool Session::library_set_watched_bit(json &state, const std::string &video_id, bool on)
+{
+    if (!d_meta_loaded_ || d_meta_.videos.empty() || d_meta_.id != w_item_.id || video_id.empty())
+        return false;
+    const auto ids = watched::sorted_ids(d_meta_.videos);
+    watched::Bits bits = watched::construct(state.value("watched", std::string()), ids);
+    if (!bits.set_video(video_id, on))
+        return false;
+    state["watched"] = bits.to_string();
+    return true;
+}
+
+// Marking an episode watched or not from its page (core: MarkVideoAsWatched).
+void Session::library_mark_video(const std::string &video_id, bool is_watched)
+{
+    if (!signed_in() || !d_open_)
+        return;
+    const Item &item = d_item_;
+    if (!d_meta_loaded_ || d_meta_.videos.empty())
+        return;
+    json &entry = library_ensure(item);
+    if (library_set_watched_bit(entry["state"], video_id, is_watched))
+    {
+        entry["_mtime"] = iso8601_now();
+        library_push("mark video", item.id);
+    }
+}
+
+void Session::watch_seek(double target_s)
+{
+    player_.seek(target_s);
+    library_seek(target_s);
 }
 
 // ---------------------------------------------------------------------------
@@ -946,23 +1253,23 @@ void Session::watch_input(const hui::InputFrame &in)
     }
     else if (in.is_pressed(Action::l3))
     {
-        player_.seek(0);
+        watch_seek(0);
     }
     else if (in.nav == Direction::left)
     {
-        player_.seek(player_.position() - 10);
+        watch_seek(player_.position() - 10);
     }
     else if (in.nav == Direction::right)
     {
-        player_.seek(player_.position() + 10);
+        watch_seek(player_.position() + 10);
     }
     else if (in.is_pressed(Action::page_prev))
     {
-        player_.seek(player_.position() - 60);
+        watch_seek(player_.position() - 60);
     }
     else if (in.is_pressed(Action::page_next))
     {
-        player_.seek(player_.position() + 60);
+        watch_seek(player_.position() + 60);
     }
     else if (in.is_pressed(Action::west))
     {

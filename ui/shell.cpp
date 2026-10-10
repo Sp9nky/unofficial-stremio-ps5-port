@@ -193,9 +193,13 @@ void Shell::open_editor(int index)
 void Shell::profile_chosen(int index)
 {
     const bool changed = index != s_.profile_active();
+    const bool at_start = !pstate_.can_leave;
     s_.profile_select(index);
     layer_ = Layer::none;
     go_page(changed ? 0 : page_);
+    // At start-up, a profile without an account gets the sign-in screen before the Board.
+    if (at_start && s_.start_sign_in_screen())
+        layer_ = Layer::sign_in;
 }
 
 void Shell::route_profiles(const hui::InputFrame &input, float dt)
@@ -570,7 +574,9 @@ void Shell::update(const hui::InputFrame &input, float dt)
     }
     else if (s_.sign_in_open)
     {
-        if (input.is_pressed(Action::back))
+        // Circle: no account for now. On the sign-in screen only once it is up (not a press made during the boot).
+        const bool up = !s_.sign_in_screen || (layer_ == Layer::sign_in && boot_out_ >= 0.35f);
+        if (up && input.is_pressed(Action::back))
             s_.sign_in_cancel();
     }
     // The keyboard dialog has the controller; its last button presses must not reach the screens.
@@ -587,15 +593,42 @@ void Shell::update(const hui::InputFrame &input, float dt)
     else if (boot_out_ < 0.0f)
     {
         boot_out_ = 0.0f;
-        board_.enter();
-        sound_.play(hui::audio::Cue::welcome);
-        // More than one person uses this console: who is watching comes first.
-        if (s_.profiles().size() > 1)
-            open_picker(false);
+        if (rebooting_)
+        {
+            // The Board the sign-in screen made us wait for is ready: it comes in as the mark lifts.
+            rebooting_ = false;
+            go_page(0);
+        }
+        else
+        {
+            board_.enter();
+            sound_.play(hui::audio::Cue::welcome);
+            // More than one person uses this console: who is watching comes first. No account: signing in does.
+            if (s_.profiles().size() > 1)
+                open_picker(false);
+            else if (s_.sign_in_screen)
+                layer_ = Layer::sign_in;
+        }
     }
     else
     {
         boot_out_ += dt;
+    }
+    // The sign-in screen ends with its sign-in (approved on the phone, or Circle): the Board comes in as it goes.
+    if (layer_ == Layer::sign_in && !s_.sign_in_screen)
+    {
+        layer_ = Layer::none;
+        if (s_.board_ready_or_wait())
+        {
+            go_page(0);
+        }
+        else
+        {
+            // Its catalogs or pictures are not here yet (the account's own, or ones still on their way): the boot
+            // animation comes back over the fading sign-in screen until they are.
+            rebooting_ = true;
+            boot_out_ = -1.0f;
+        }
     }
     const bool booting = boot_out_ < 0.35f;
     const bool held = s_.update_open || update_t_.value > 0.3f || s_.dropdown_open || s_.sign_in_open || dropdown_t_.value > 0.3f || typing_hold_ > 0.0f || booting;
@@ -610,7 +643,7 @@ void Shell::update(const hui::InputFrame &input, float dt)
         player_ui_.state = s_.playing;
         player_ui_.update(dt);
     }
-    else if (layer_ != Layer::none)
+    else if (layer_ == Layer::picker || layer_ == Layer::editor)
     {
         route_profiles(in, dt);
     }
@@ -645,11 +678,29 @@ void Shell::update(const hui::InputFrame &input, float dt)
     };
     pfocus_.update(dt, 16.0f);
     pstate_.focus = pfocus_.value;
-    fade(pick_t_, layer_ != Layer::none, 18.0f, 30.0f);
+    fade(pick_t_, layer_ == Layer::picker || layer_ == Layer::editor, 18.0f, 30.0f);
+    // The sign-in screen comes in once the boot's mark has nearly lifted, and goes as fast as the pop-ups do.
+    fade(signin_t_, layer_ == Layer::sign_in && boot_out_ >= 0.3f, 18.0f, 30.0f);
+    if (s_.sign_in_screen)
+    {
+        wall_.resize(s_.wall.size());
+        for (std::size_t i = 0; i < wall_.size(); ++i)
+        {
+            if (wall_[i].id != s_.wall[i])
+                wall_[i] = WallTile{s_.wall[i], 0.0f};
+            if (wall_[i].id != 0)
+                wall_[i].alpha = std::min(1.0f, wall_[i].alpha + dt / 0.6f);
+        }
+    }
+    else if (signin_t_.value < 0.01f)
+    {
+        // Kept while the screen fades out (the cache keeps a picture used in the last second on the GPU).
+        wall_.clear();
+    }
     fade(edit_t_, layer_ == Layer::editor, 22.0f, 34.0f);
     fade(update_t_, s_.update_open, 22.0f, 34.0f);
     fade(dropdown_t_, s_.dropdown_open, 22.0f, 34.0f);
-    fade(sign_in_t_, s_.sign_in_open, 18.0f, 30.0f);
+    fade(sign_in_t_, s_.sign_in_open && !s_.sign_in_screen, 18.0f, 30.0f);
     const auto ring = [dt](hui::tween::Spring &p, float target, bool shown) {
         p.target = target;
         if (!shown)
@@ -673,6 +724,9 @@ void Shell::draw(hui::gfx::DrawList &list, hui::gfx::BackdropSpec &backdrop) con
     {
         apply_page_backdrop(backdrop, boot_t_);
         draw_boot(list, env_, boot_t_, 0.0f);
+        // The sign-in screen, fading out over it when the wait comes back after signing in.
+        if (signin_t_.value > 0.01f)
+            draw_sign_in_screen(list, env_, s_.sign_in, wall_, clock_, signin_t_.value);
         return;
     }
     if (s_.watching)
@@ -685,10 +739,11 @@ void Shell::draw(hui::gfx::DrawList &list, hui::gfx::BackdropSpec &backdrop) con
         else
         {
             backdrop.mode = hui::gfx::BackdropMode::none;
-            if (s_.video_hdr && s_.video_texture_hdr != 0)
+            const bool hdr_picture = s_.video_hdr && (s_.video_gpu ? s_.video_plane_y != 0 : s_.video_texture_hdr != 0);
+            if (hdr_picture)
             {
                 // The HDR pass draws the video (and the black around it); only the interface goes in the list.
-                const float w = static_cast<float>(s_.video_hdr_w), h = static_cast<float>(s_.video_hdr_h);
+                const float w = static_cast<float>(s_.video_disp_w), h = static_cast<float>(s_.video_disp_h);
                 s_.hdr_rect = {(theme::kScreenW - w) * 0.5f, (theme::kScreenH - h) * 0.5f, w, h};
             }
             else
@@ -696,7 +751,7 @@ void Shell::draw(hui::gfx::DrawList &list, hui::gfx::BackdropSpec &backdrop) con
                 s_.hdr_rect = {};
                 list.rounded_rect({0, 0, theme::kScreenW, theme::kScreenH}, 0, hui::gfx::Color::rgb(0x000000));
             }
-            if (!(s_.video_hdr && s_.video_texture_hdr != 0) && s_.video_texture != 0)
+            if (!hdr_picture && s_.video_texture != 0)
             {
                 const float w = static_cast<float>(s_.video_w), h = static_cast<float>(s_.video_h);
                 list.image(s_.video_texture, {(theme::kScreenW - w) * 0.5f, (theme::kScreenH - h) * 0.5f, w, h},
@@ -704,6 +759,11 @@ void Shell::draw(hui::gfx::DrawList &list, hui::gfx::BackdropSpec &backdrop) con
             }
             player_ui_.draw(list);
         }
+    }
+    else if (layer_ == Layer::sign_in)
+    {
+        // The sign-in screen covers everything: under it only the page's light, which the boot animation stood on.
+        apply_page_backdrop(backdrop, clock_);
     }
     else if (layer_ != Layer::none)
     {
@@ -745,6 +805,8 @@ void Shell::draw(hui::gfx::DrawList &list, hui::gfx::BackdropSpec &backdrop) con
             break;
         }
     }
+    if (signin_t_.value > 0.01f)
+        draw_sign_in_screen(list, env_, s_.sign_in, wall_, clock_, signin_t_.value);
     if (dropdown_t_.value > 0.01f)
     {
         DropdownState d = s_.dropdown;

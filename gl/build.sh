@@ -42,7 +42,7 @@ FLAGS=(-std=c++20 -O2 -w -DGL_GLEXT_PROTOTYPES=1 -DHAVE_FRIBIDI -DHAVE_WEBP
 
 echo ">> compiling"
 sources=("$ROOT"/ui/*.cpp "$ROOT"/gl/*.cpp
-	"$ROOT/src/bidi.cpp" "$ROOT/src/stremio.cpp" "$ROOT/src/http.cpp" "$ROOT/src/util.cpp" "$ROOT/src/tasks.cpp"
+	"$ROOT/src/bidi.cpp" "$ROOT/src/debrid.cpp" "$ROOT/src/stremio.cpp" "$ROOT/src/http.cpp" "$ROOT/src/util.cpp" "$ROOT/src/tasks.cpp"
 	"$ROOT/src/player.cpp" "$ROOT/src/netstream.cpp" "$ROOT/src/hwdec_ps5.cpp" "$ROOT/src/yuv_convert.cpp"
 	"$ROOT/src/subtitles.cpp" "$ROOT/src/pcm_out.cpp" "$ROOT"/src/torrent/*.cpp
 	"$HUI"/src/gfx/*.cpp "$HUI"/src/audio/{mixer,cues,wav}.cpp "$HUI/src/platform/ps5/audio_out.cpp" "$HUI/src/core/save_file.cpp" "$HUI/src/core/input.cpp" "$HUI/src/ui/glyphs.cpp"
@@ -119,7 +119,7 @@ PY
 cp "$ROOT/app/sce_sys/icon0.png" "$ROOT/app/sce_sys/pic0.dds" "$ROOT/app/sce_sys/pic1.dds" "$APP/sce_sys/"
 bash "$BP/tools/validate-assets.sh" "$APP/sce_sys" >/dev/null
 mkdir -p "$APP/fonts" "$APP/hui-fonts" "$APP/icons"
-cp "$ROOT"/app/fonts/{Inter-Regular,Inter-SemiBold,Montserrat-Medium,NotoSans-Regular,NotoSans-Bold,NotoNaskhArabicUI-Regular,NotoNaskhArabicUI-Bold}.ttf "$APP/fonts/"
+cp "$ROOT"/app/fonts/{Inter-Regular,Inter-SemiBold,Montserrat-Medium,NotoSans-Regular,NotoSans-Bold,NotoNaskhArabicUI-Regular,NotoNaskhArabicUI-Bold,NotoSansHebrew-Regular,NotoSansHebrew-Bold,NotoSansThai-Regular,NotoSansThai-Bold,NotoSansJP-Subset,NotoSansSC-Subset,NotoSansTC-Subset,NotoSansKR-Subset}.ttf "$APP/fonts/"
 # the fonts' license texts travel with them
 cp "$ROOT"/app/fonts/*.txt "$APP/fonts/" 2>/dev/null || true
 cp "$HUI"/assets/fonts/*.huifont "$HUI"/assets/fonts/*LICENSE*.txt "$APP/hui-fonts/"

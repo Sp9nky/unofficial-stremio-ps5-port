@@ -46,6 +46,7 @@ struct State
     GLuint ui_fbo = 0, ui_tex = 0;
     int ui_w = 0, ui_h = 0;
     GLuint program = 0, vao = 0;
+    GLuint sdr_program = 0;
     bool gl_failed = false;
 } g;
 
@@ -117,8 +118,33 @@ layout(location = 0) uniform sampler2D u_ui;
 layout(location = 1) uniform sampler2D u_video;
 layout(location = 2) uniform vec4 u_rect;  // the video's rectangle in pixels: x, y (from the top), width, height
 layout(location = 3) uniform vec2 u_size;  // the surface in pixels
-layout(location = 4) uniform float u_has_video;
+layout(location = 4) uniform float u_has_video;  // 0 none, 1 a 10-bit texture, 2 planes
+layout(location = 5) uniform sampler2DRect u_yplane;
+layout(location = 6) uniform sampler2DRect u_uvplane;
+layout(location = 7) uniform vec4 u_planes;  // plane width, height, the scale from a texel to a 10-bit value, 1 for HLG
 out vec4 frag_color;
+
+// HLG video on the PQ-only HDR output (ITU-R BT.2100), as PS5MC's shader does it: HLG signal to scene light (inverse
+// OETF), to display light for a 1000 cd/m2 display (OOTF, gamma 1.2), to the PQ signal normalised to 10000 cd/m2.
+vec3 hlg_to_pq(vec3 e)
+{
+    const float a = 0.17883277;
+    const float b = 0.28466892;
+    const float c = 0.55991073;
+    const float m1 = 0.1593017578125;
+    const float m2 = 78.84375;
+    const float c1 = 0.8359375;
+    const float c2 = 18.8515625;
+    const float c3 = 18.6875;
+    e = clamp(e, 0.0, 1.0);
+    vec3 low = e * e / 3.0;
+    vec3 high = (exp((e - c) / a) + b) / 12.0;
+    vec3 scene = mix(low, high, step(0.5, e));
+    float ys = dot(scene, vec3(0.2627, 0.6780, 0.0593));
+    vec3 display = scene * pow(max(ys, 1e-6), 0.2) * (1000.0 / 10000.0);
+    vec3 p = pow(max(display, 0.0), vec3(m1));
+    return pow((c1 + c2 * p) / (1.0 + c3 * p), vec3(m2));
+}
 
 vec3 pq_encode(vec3 l)
 {
@@ -139,7 +165,23 @@ void main()
     {
         vec2 uv = vec2((fc.x - u_rect.x) / u_rect.z, ((u_size.y - fc.y) - u_rect.y) / u_rect.w);
         if (uv.x >= 0.0 && uv.x <= 1.0 && uv.y >= 0.0 && uv.y <= 1.0)
-            pq = texture(u_video, uv).rgb;
+        {
+            if (u_has_video < 1.5)
+                pq = texture(u_video, uv).rgb;
+            else
+            {
+                // The planes at their own size (rectangle textures take texel coordinates); BT.2020 non-constant
+                // luminance, limited range, 10-bit: the matrix leaves the signal PQ (or HLG) coded.
+                vec2 tc = uv * u_planes.xy;
+                float y10 = texture(u_yplane, tc).r * u_planes.z;
+                vec2 c10 = texture(u_uvplane, tc * 0.5).rg * u_planes.z;
+                float yn = (y10 - 64.0) / 876.0;
+                float cb = (c10.x - 512.0) / 896.0;
+                float cr = (c10.y - 512.0) / 896.0;
+                vec3 e = clamp(vec3(yn + 1.4746 * cr, yn - 0.164553 * cb - 0.571353 * cr, yn + 1.8814 * cb), 0.0, 1.0);
+                pq = u_planes.w > 0.5 ? hlg_to_pq(e) : e;
+            }
+        }
     }
     // The interface was drawn into a transparent target, so its colour is premultiplied. It is SDR (sRGB-ish,
     // BT.709): to light, to BT.2020, scaled so that white is 203 nits, to PQ.
@@ -147,7 +189,8 @@ void main()
     if (ui.a > 0.0)
     {
         vec3 c = clamp(ui.rgb / ui.a, 0.0, 1.0);
-        vec3 lin = pow(c, vec3(2.2));
+        // sRGB to linear (the piecewise curve of IEC 61966-2-1, as PS5MC's GUI shader does)
+        vec3 lin = mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(0.04045, c));
         vec3 wide = vec3(dot(lin, vec3(0.6274, 0.3293, 0.0433)), dot(lin, vec3(0.0691, 0.9195, 0.0114)),
                          dot(lin, vec3(0.0164, 0.0880, 0.8956)));
         pq = mix(pq, pq_encode(wide * (203.0 / 10000.0)), ui.a);
@@ -163,6 +206,28 @@ void main()
 }
 )";
 
+// 10-bit SDR planes into an RGBA8 target (no integer conversions, as above). Row 0 of the target is the top of the picture.
+constexpr const char *kSdrFragment = R"(
+layout(location = 0) uniform sampler2DRect u_yplane;
+layout(location = 1) uniform sampler2DRect u_uvplane;
+layout(location = 2) uniform vec4 u_planes;  // plane width, height, the scale from a texel to a 10-bit value, 1 for BT.601
+layout(location = 3) uniform vec2 u_out;     // the target's size in pixels
+out vec4 frag_color;
+
+void main()
+{
+    vec2 tc = gl_FragCoord.xy / u_out * u_planes.xy;
+    float y10 = texture(u_yplane, tc).r * u_planes.z;
+    vec2 c10 = texture(u_uvplane, tc * 0.5).rg * u_planes.z;
+    float yn = (y10 - 64.0) / 876.0;
+    float cb = (c10.x - 512.0) / 896.0;
+    float cr = (c10.y - 512.0) / 896.0;
+    vec3 rgb = u_planes.w > 0.5 ? vec3(yn + 1.402 * cr, yn - 0.344136 * cb - 0.714136 * cr, yn + 1.772 * cb)
+                                : vec3(yn + 1.5748 * cr, yn - 0.187324 * cb - 0.468124 * cr, yn + 1.8556 * cb);
+    frag_color = vec4(clamp(rgb, 0.0, 1.0), 1.0);
+}
+)";
+
 bool ensure_program()
 {
     if (g.program != 0)
@@ -171,6 +236,18 @@ bool ensure_program()
     if (g.program == 0)
         return false;
     glGenVertexArrays(1, &g.vao);
+    return true;
+}
+
+bool ensure_sdr_program()
+{
+    if (g.sdr_program != 0)
+        return true;
+    g.sdr_program = hui::gfx::build_program("sdr-planes", kVertex, kSdrFragment);
+    if (g.sdr_program == 0)
+        return false;
+    if (g.vao == 0)
+        glGenVertexArrays(1, &g.vao);
     return true;
 }
 
@@ -258,6 +335,11 @@ void init(int surface_width, int surface_height)
     g.no_handle_text = text;
     hui::sys::log("[HDR] %s", text);
 #endif
+}
+
+std::int32_t video_out_handle()
+{
+    return g.handle;
 }
 
 bool scanout_hdr()
@@ -377,8 +459,130 @@ bool video_upload(std::uint32_t *texture, int *tex_w, int *tex_h, int w, int h, 
     return true;
 }
 
-bool present(hui::gfx::Renderer &renderer, int width, int height, std::uint32_t video, const hui::gfx::Rect &video_rect,
-             std::uint32_t target_framebuffer)
+namespace
+{
+bool make_rect_texture(GLuint *tex, GLenum internal_format, GLenum format, int w, int h, const void *data)
+{
+    GLuint t = 0;
+    glGenTextures(1, &t);
+    glBindTexture(GL_TEXTURE_RECTANGLE, t);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+    glTexImage2D(GL_TEXTURE_RECTANGLE, 0, internal_format, w, h, 0, format, GL_UNSIGNED_SHORT, data);
+    glTexParameteri(GL_TEXTURE_RECTANGLE, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_RECTANGLE, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_RECTANGLE, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_RECTANGLE, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    const GLenum err = glGetError();
+    if (err != GL_NO_ERROR)
+    {
+        hui::sys::log("[HDR] a %dx%d plane texture failed (GL error %#x)", w, h, static_cast<unsigned>(err));
+        glDeleteTextures(1, &t);
+        return false;
+    }
+    *tex = t;
+    return true;
+}
+} // namespace
+
+bool planes_upload(VideoPlanes *planes, int w, int h, const void *y16, const void *uv16)
+{
+    if (planes->y == 0 || planes->w != w || planes->h != h)
+    {
+        if (planes->y != 0)
+        {
+            const GLuint old[2] = {planes->y, planes->uv};
+            glDeleteTextures(2, old);
+            planes->y = planes->uv = 0;
+        }
+        GLuint ty = 0, tuv = 0;
+        if (!make_rect_texture(&ty, GL_R16, GL_RED, w, h, y16))
+            return false;
+        if (!make_rect_texture(&tuv, GL_RG16, GL_RG, w / 2, h / 2, uv16))
+        {
+            glDeleteTextures(1, &ty);
+            return false;
+        }
+        planes->y = ty;
+        planes->uv = tuv;
+        planes->w = w;
+        planes->h = h;
+        hui::sys::log("[HDR] video planes %dx%d as rectangle textures", w, h);
+        return true;
+    }
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+    glBindTexture(GL_TEXTURE_RECTANGLE, planes->y);
+    glTexSubImage2D(GL_TEXTURE_RECTANGLE, 0, 0, 0, w, h, GL_RED, GL_UNSIGNED_SHORT, y16);
+    glBindTexture(GL_TEXTURE_RECTANGLE, planes->uv);
+    glTexSubImage2D(GL_TEXTURE_RECTANGLE, 0, 0, 0, w / 2, h / 2, GL_RG, GL_UNSIGNED_SHORT, uv16);
+    return true;
+}
+
+void sdr_release(SdrTarget *t)
+{
+    if (t->fbo != 0)
+        glDeleteFramebuffers(1, &t->fbo);
+    if (t->texture != 0)
+        glDeleteTextures(1, &t->texture);
+    *t = SdrTarget();
+}
+
+bool sdr_convert(SdrTarget *t, const VideoPlanes &planes, int out_w, int out_h, bool bt601)
+{
+    if (planes.y == 0 || out_w <= 0 || out_h <= 0 || !ensure_sdr_program())
+        return false;
+    if (t->fbo == 0 || t->w != out_w || t->h != out_h)
+    {
+        sdr_release(t);
+        glGenTextures(1, &t->texture);
+        glBindTexture(GL_TEXTURE_2D, t->texture);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, out_w, out_h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glGenFramebuffers(1, &t->fbo);
+        glBindFramebuffer(GL_FRAMEBUFFER, t->fbo);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, t->texture, 0);
+        const GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        if (status != GL_FRAMEBUFFER_COMPLETE)
+        {
+            hui::sys::log("[SDR] the video target %dx%d is incomplete (%#x)", out_w, out_h, static_cast<unsigned>(status));
+            sdr_release(t);
+            return false;
+        }
+        t->w = out_w;
+        t->h = out_h;
+        hui::sys::log("[SDR] 10-bit pictures are converted on the GPU: %dx%d planes to %dx%d", planes.w, planes.h, out_w, out_h);
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, t->fbo);
+    glViewport(0, 0, out_w, out_h);
+    glDisable(GL_BLEND);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
+    glDisable(GL_SCISSOR_TEST);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glUseProgram(g.sdr_program);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_RECTANGLE, planes.y);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_RECTANGLE, planes.uv);
+    glUniform1i(0, 0);
+    glUniform1i(1, 1);
+    glUniform4f(2, static_cast<float>(planes.w), static_cast<float>(planes.h), planes.high_aligned ? 65535.0f / 64.0f : 65535.0f,
+                bt601 ? 1.0f : 0.0f);
+    glUniform2f(3, static_cast<float>(out_w), static_cast<float>(out_h));
+    glBindVertexArray(g.vao);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    glBindVertexArray(0);
+    glActiveTexture(GL_TEXTURE0);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    return true;
+}
+
+bool present(hui::gfx::Renderer &renderer, int width, int height, std::uint32_t video, const VideoPlanes *planes,
+             const hui::gfx::Rect &video_rect, std::uint32_t target_framebuffer)
 {
     if (!ensure_program() || !ensure_target(width, height))
     {
@@ -408,12 +612,26 @@ bool present(hui::gfx::Renderer &renderer, int width, int height, std::uint32_t 
     glBindTexture(GL_TEXTURE_2D, g.ui_tex);
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_2D, video != 0 ? video : g.ui_tex);
+    const bool have_planes = planes != nullptr && planes->y != 0;
+    if (have_planes)
+    {
+        glActiveTexture(GL_TEXTURE2);
+        glBindTexture(GL_TEXTURE_RECTANGLE, planes->y);
+        glActiveTexture(GL_TEXTURE3);
+        glBindTexture(GL_TEXTURE_RECTANGLE, planes->uv);
+        // a texel is a 16-bit word: low-aligned 10-bit values (0-1023) read back as value / 65535; high-aligned ones
+        // (value << 6) as value / 1023
+        glUniform4f(7, static_cast<float>(planes->w), static_cast<float>(planes->h),
+                    planes->high_aligned ? 65535.0f / 64.0f : 65535.0f, planes->hlg ? 1.0f : 0.0f);
+    }
     glUniform1i(0, 0);
     glUniform1i(1, 1);
+    glUniform1i(5, 2);
+    glUniform1i(6, 3);
     glUniform4f(2, vp.offset_x + video_rect.x * vp.scale, vp.offset_y + video_rect.y * vp.scale, video_rect.w * vp.scale,
                 video_rect.h * vp.scale);
     glUniform2f(3, static_cast<float>(width), static_cast<float>(height));
-    glUniform1f(4, video != 0 ? 1.0f : 0.0f);
+    glUniform1f(4, have_planes ? 2.0f : video != 0 ? 1.0f : 0.0f);
     glBindVertexArray(g.vao);
     glDrawArrays(GL_TRIANGLES, 0, 3);
     glBindVertexArray(0);

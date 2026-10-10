@@ -22,6 +22,20 @@
 #include "../../gl/hdr_out.hpp"
 #include "page.hpp"
 #include "player.hpp"
+#include "hdr_out.hpp"
+#include "yuv_convert.h"
+#include "gpu_upload.hpp"
+#include "art.hpp"
+#include "http.h"
+#include "util.h"
+namespace sx
+{
+class Session;
+}
+namespace sx::preview
+{
+void test_login_done(Session &session, const std::string &auth_key);
+}
 #include "sample.hpp"
 #include "scripts_scene.hpp"
 #include "worst_cases.hpp"
@@ -38,11 +52,13 @@
 #include "../../third_party/hui/third_party/stb/stb_image_write.h"
 
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <thread>
 #include <tuple>
 #include <functional>
+#include <filesystem>
 #include <cstdlib>
 #include <string>
 #include <vector>
@@ -269,6 +285,40 @@ int main(int argc, char **argv)
             sx::draw_dropdown(list, env, dd, 1.0f);
             rig.shot(i == 0 ? "board-5-continue" : i == 1 ? "board-6-options" : "board-7-confirm", backdrop, list);
         }    }
+    if (wants("signin"))
+    {
+        // The sign-in screen before the Board (sample content): up, coming in, and without a code yet.
+        sx::BoardContent content;
+        if (!sx::preview::load_board(rig.renderer, art, &content))
+            return 1;
+        std::vector<sx::WallTile> wall;
+        for (const auto &row : content.rows)
+            for (const auto &item : row.items)
+                if (item.poster != 0 && wall.size() < 36)
+                    wall.push_back({item.poster, 1.0f});
+        sx::SignInState in;
+        in.qr = sx::preview::load_texture(rig.renderer, art + "/qr.png");
+        in.code = "A7KP";
+        in.link = "link.stremio.com";
+        sx::SignInState failed;
+        failed.link = "link.stremio.com";
+        failed.status = "Could not get a code: Could not resolve host: link.stremio.com";
+        failed.failed = true;
+        const struct
+        {
+            const sx::SignInState *state;
+            float t;
+            const char *name;
+        } shots[] = {{&in, 1.0f, "signin-screen"}, {&in, 0.5f, "signin-screen-coming-in"}, {&failed, 1.0f, "signin-screen-no-code"}};
+        for (const auto &shot : shots)
+        {
+            hui::gfx::DrawList list;
+            hui::gfx::BackdropSpec backdrop;
+            sx::apply_page_backdrop(backdrop, 0.6f);
+            sx::draw_sign_in_screen(list, env, *shot.state, wall, 0.6f, shot.t);
+            rig.shot(shot.name, backdrop, list);
+        }
+    }
     if (wants("discover"))
     {
         sx::DiscoverContent content;
@@ -403,6 +453,225 @@ int main(int argc, char **argv)
             page.enter();
             settle(page, 90);
             shoot(page, "search-3-no-results");
+        }
+    }
+    if (only == "artcache")
+    {
+        // The artwork pipeline against a pretend image host (tools/tests/run_art_test.sh starts it).
+        const char *port = std::getenv("ART_PORT");
+        const std::string base = std::string("http://127.0.0.1:") + (port ? port : "18996");
+        const std::string dir = "/tmp/artcache-test";
+        std::system(("rm -rf " + dir).c_str());
+        sx::TexCache cache;
+        cache.init(dir, &rig.renderer, 6);
+        int bad = 0;
+        const auto check = [&](bool ok, const std::string &what) {
+            std::printf("%s %s\n", ok ? "ok  " : "FAIL", what.c_str());
+            if (!ok)
+                ++bad;
+        };
+        const auto wait_tex = [&](const std::string &url, sx::ArtKind kind, double secs) -> std::uint32_t {
+            const auto t0 = std::chrono::steady_clock::now();
+            while (std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() < secs)
+            {
+                if (const std::uint32_t id = cache.get(url, kind))
+                    return id;
+                cache.pump(12);
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            }
+            return 0;
+        };
+        const auto tex_w = [](std::uint32_t id) {
+            GLint w = 0;
+            glBindTexture(GL_TEXTURE_2D, id);
+            glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &w);
+            return int(w);
+        };
+        const auto hits = [&](const std::string &path) {
+            const json j = json::parse(http_get(base + "/__stats", 5).body, nullptr, false);
+            return j.is_object() && j["hits"].contains(path) ? j["hits"][path].get<int>() : 0;
+        };
+        using sx::ArtKind;
+        check(sx::better_url("https://images.metahub.space/poster/small/tt1/img", ArtKind::poster) ==
+                  "https://images.metahub.space/poster/medium/tt1/img",
+              "metahub's 300 x 450 posters are asked as its 500 x 750 ones");
+        check(sx::better_url("https://images.metahub.space/background/medium/tt1/img", ArtKind::backdrop) ==
+                  "https://images.metahub.space/background/medium/tt1/img",
+              "other addresses are left as they are");
+        const std::uint32_t same = wait_tex(base + "/background/medium/same/img", ArtKind::backdrop, 20);
+        check(same != 0 && tex_w(same) == 2560, "a 1280 wallpaper whose big copy is the same picture comes out 2560 wide (got " +
+                                                    std::to_string(same ? tex_w(same) : 0) + ")");
+        const std::uint32_t diff = wait_tex(base + "/background/medium/diff/img", ArtKind::backdrop, 20);
+        check(diff != 0 && tex_w(diff) == 1920, "a big copy that is other artwork is left out (1920 wide)");
+        const std::uint32_t wide = wait_tex(base + "/background/medium/wide/img", ArtKind::backdrop, 20);
+        check(wide != 0 && tex_w(wide) == 1920 && hits("/background/big/wide/img") == 0,
+              "a 1920 wallpaper does not fetch its big copy");
+        wait_tex(base + "/missing/img", ArtKind::poster, 3);
+        check(cache.peek(base + "/missing/img", ArtKind::poster) == 0 && hits("/missing/img") == 1,
+              "a picture that is not there (404) is asked once and given up");
+        const std::uint32_t flaky = wait_tex(base + "/flaky/img", ArtKind::poster, 25);
+        check(flaky != 0 && hits("/flaky/img") == 3, "a busy host (503 twice) is asked again later, and the picture comes");
+        cache.warm(base + "/poster/medium/tt2/img", ArtKind::poster);
+        for (int i = 0; i < 100 && hits("/poster/medium/tt2/img") == 0; ++i)
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        cache.pump(12);
+        check(cache.peek(base + "/poster/medium/tt2/img", ArtKind::poster) == 0, "a warmed picture is not put on the GPU");
+        const std::uint32_t warmed = wait_tex(base + "/poster/medium/tt2/img", ArtKind::poster, 10);
+        check(warmed != 0 && hits("/poster/medium/tt2/img") == 1, "asked for later, it comes from disk, not downloaded again");
+        check(cache.cached(base + "/poster/medium/tt2/img", ArtKind::poster) && !cache.cached(base + "/never/asked/img", ArtKind::poster),
+              "a picture counts as cached once it is on disk, and not before");
+        const std::uint32_t wall = wait_tex(base + "/poster/medium/tt2/img", ArtKind::wall, 10);
+        check(wall != 0 && tex_w(wall) == 216 && hits("/poster/medium/tt2/img") == 1,
+              "the sign-in wall's copy is cut from the poster on disk (216 wide, no second download)");
+        const std::uint32_t wall_first = wait_tex(base + "/poster/medium/tt1/img", ArtKind::wall, 10);
+        const std::uint32_t card_after = wait_tex(base + "/poster/medium/tt1/img", ArtKind::poster, 10);
+        check(wall_first != 0 && card_after != 0 && tex_w(card_after) == 480 && hits("/poster/medium/tt1/img") == 1,
+              "a wall copy asked for first fetches the poster once and keeps it for the card");
+        {
+            const int w = 301, h = 173; // odd sizes on purpose
+            std::vector<unsigned char> px(size_t(w) * h * 4);
+            for (size_t i = 0; i < px.size(); ++i)
+                px[i] = static_cast<unsigned char>((i * 2654435761u) >> 13);
+            const std::uint32_t id = sx::gpu::texture_from_rgba(w, h, px.data());
+            std::vector<unsigned char> back(px.size());
+            GLuint fbo = 0;
+            glGenFramebuffers(1, &fbo);
+            glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, id, 0);
+            glPixelStorei(GL_PACK_ALIGNMENT, 1);
+            glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, back.data());
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            glDeleteFramebuffers(1, &fbo);
+            check(id != 0 && back == px, "the GPU copy of a picture is bit for bit the picture, the right way up");
+        }
+        const json st = json::parse(http_get(base + "/__stats", 5).body, nullptr, false);
+        int requests = 0;
+        for (auto it = st["hits"].begin(); it != st["hits"].end(); ++it)
+            if (it.key() != "/__stats")
+                requests += it.value().get<int>();
+        check(st["connections"].get<int>() < requests, "connections are kept open between pictures (" +
+                                                          std::to_string(st["connections"].get<int>()) + " connections for " +
+                                                          std::to_string(requests) + " requests)");
+        cache.shutdown();
+        std::printf(bad ? "artcache: %d check(s) failed\n" : "artcache OK\n", bad);
+        return bad ? 1 : 0;
+    }
+    if (wants("sdrconv"))
+    {
+        // The GPU conversion of 10-bit SDR planes against the CPU one, on colour bars with a gradient, low- and high-aligned.
+        const int w = 128, h = 64, ow = w / 2, oh = h / 2;
+        int worst_all = 0;
+        for (int variant = 0; variant < 4; ++variant)
+        {
+            const bool high = variant & 1, bt601 = variant & 2;
+            std::vector<std::uint16_t> y(size_t(w) * h), uv(size_t(w / 2) * (h / 2) * 2);
+            const double kr = bt601 ? 0.299 : 0.2126, kb = bt601 ? 0.114 : 0.0722, kg = 1.0 - kr - kb;
+            const double bars[8][3] = {{1, 1, 1}, {1, 1, 0}, {0, 1, 1}, {0, 1, 0}, {1, 0, 1}, {1, 0, 0}, {0, 0, 1}, {0.2, 0.2, 0.2}};
+            auto encode = [&](int px, int py, double* yy, double* cb, double* cr) {
+                const double* c = bars[(px * 8) / w];
+                const double g = 0.2 + 0.8 * double(py) / h;  // a vertical ramp inside each bar
+                const double r = c[0] * g, gg = c[1] * g, b = c[2] * g;
+                *yy = kr * r + kg * gg + kb * b;
+                *cb = (b - *yy) / (2 * (1 - kb));
+                *cr = (r - *yy) / (2 * (1 - kr));
+            };
+            for (int py = 0; py < h; ++py)
+                for (int px = 0; px < w; ++px)
+                {
+                    double yy, cb, cr;
+                    encode(px, py, &yy, &cb, &cr);
+                    int v = int(64 + 876 * yy + 0.5);
+                    y[size_t(py) * w + px] = std::uint16_t(high ? v << 6 : v);
+                }
+            for (int py = 0; py < h / 2; ++py)
+                for (int px = 0; px < w / 2; ++px)
+                {
+                    double yy, cb, cr;
+                    encode(px * 2, py * 2, &yy, &cb, &cr);
+                    int u = int(512 + 896 * cb + 0.5), v = int(512 + 896 * cr + 0.5);
+                    uv[(size_t(py) * (w / 2) + px) * 2] = std::uint16_t(high ? u << 6 : u);
+                    uv[(size_t(py) * (w / 2) + px) * 2 + 1] = std::uint16_t(high ? v << 6 : v);
+                }
+            sx::hdr::VideoPlanes planes;
+            planes.high_aligned = high;
+            if (!sx::hdr::planes_upload(&planes, w, h, y.data(), uv.data()))
+            {
+                std::fprintf(stderr, "sdrconv: planes refused\n");
+                return 1;
+            }
+            sx::hdr::SdrTarget target;
+            if (!sx::hdr::sdr_convert(&target, planes, ow, oh, bt601))
+            {
+                std::fprintf(stderr, "sdrconv: convert failed\n");
+                return 1;
+            }
+            std::vector<std::uint8_t> gpu(size_t(ow) * oh * 4), cpu(size_t(ow) * oh * 4);
+            glBindFramebuffer(GL_FRAMEBUFFER, target.fbo);
+            glReadPixels(0, 0, ow, oh, GL_RGBA, GL_UNSIGNED_BYTE, gpu.data());
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            YuvPicture yp;
+            yp.y = reinterpret_cast<const std::uint8_t*>(y.data());
+            yp.u = reinterpret_cast<const std::uint8_t*>(uv.data());
+            yp.y_stride = yp.c_stride = w * 2;
+            yp.interleaved = true;
+            yp.wide = true;
+            yp.shift = high ? 6 : 0;
+            yp.width = w;
+            yp.height = h;
+            yuv_to_rgba(yp, bt601 ? YuvColors::Bt601 : YuvColors::Bt709, 2, cpu.data(), ow, 0, oh);
+            int worst = 0;
+            long sum = 0;
+            for (size_t i = 0; i < gpu.size(); ++i)
+                if (i % 4 != 3)
+                {
+                    const int d = std::abs(int(gpu[i]) - int(cpu[i]));
+                    worst = std::max(worst, d);
+                    sum += d;
+                }
+            std::printf("sdrconv %s %s: GPU vs CPU, largest difference %d of 255, mean %.2f\n", high ? "high-aligned" : "low-aligned",
+                        bt601 ? "BT.601" : "BT.709", worst, double(sum) / double(gpu.size() * 3 / 4));
+            worst_all = std::max(worst_all, worst);
+            sx::hdr::sdr_release(&target);
+        }
+        std::printf(worst_all <= 6 ? "sdrconv OK\n" : "sdrconv FAILED\n");
+        return worst_all <= 6 ? 0 : 1;
+    }
+    if (wants("subtitles"))
+    {
+        // What a subtitle looks like in each script, as the player draws it (text in logical order, as the cues hold it).
+        struct Case
+        {
+            const char *name, *text;
+        };
+        const Case cases[] = {
+            {"arabic", "مرحبا بالعالم، كيف حالك اليوم؟\n(ضحك) لا أعرف ماذا أقول 25 دقيقة"},
+            {"arabic-name-first", "Tom قال لي إن الطقس جميل اليوم في المدينة، أليس كذلك؟"},
+            {"hebrew", "שלום עולם, מה שלומך היום?\nאני לא יודע מה לומר (בבקשה)"},
+            {"japanese", "千と千尋の神隠し\n「どうして私がこんなことをしなければならないの？」"},
+            {"japanese-long", "これは非常に長い日本語の字幕で、画面の幅に収まるように自動的に折り返されなければなりません。そうでなければ読めません。"},
+            {"chinese-simplified", "你好，世界！这是一个简体中文字幕的例子。\n我们必须确保它显示正确。"},
+            {"chinese-traditional", "你好，世界！這是一個繁體中文字幕的例子。\n我們必須確保它顯示正確。"},
+            {"korean", "안녕하세요, 세계! 오늘 기분이 어떠세요?\n한국어 자막이 올바르게 표시되어야 합니다."},
+            {"thai", "สวัสดีชาวโลก วันนี้คุณเป็นอย่างไรบ้าง\nคำบรรยายภาษาไทยต้องแสดงอย่างถูกต้อง"},
+            {"english-long", "This is a very long English subtitle line that goes on and on and must be wrapped to fit on the screen without running off either side of it."},
+            {"mixed", "Matrix – ماتريكس (1999) · マトリックス · 黑客帝国"},
+        };
+        const std::uint32_t frame = sx::preview::load_frame(rig.renderer, art, 1);
+        sx::PlayerUi ui(env);
+        ui.state = sx::preview::sample_player();
+        ui.state.controls = false;
+        for (const Case &c : cases)
+        {
+            ui.state.line = c.text;
+            ui.snap();
+            for (int i = 0; i < 4; ++i)
+                ui.update(kDt);
+            hui::gfx::DrawList list;
+            hui::gfx::BackdropSpec backdrop;
+            list.image(frame, {0, 0, 1920, 1080}, kFullUv, hui::gfx::Color::rgb(0xffffff));
+            ui.draw(list);
+            rig.shot((std::string("subtitle-") + c.name).c_str(), backdrop, list);
         }
     }
     if (wants("player"))
@@ -670,6 +939,263 @@ int main(int argc, char **argv)
         send(hui::Action::confirm, Direction::none, 60); // the account row: sign in
         wait(6);
         look("live-12-sign-in");
+        session.shutdown();
+    }
+    // The start when no one is signed in (needs the network): a fresh app, the boot, the sign-in screen with a real
+    // code and its wall, then Circle to the Board. Not part of "all".
+    if (only == "startsignin")
+    {
+        const char *home = std::getenv("HOME");
+        const std::string data_dir = std::string(home ? home : "/tmp") + "/signin-data";
+        std::filesystem::remove_all(data_dir);
+        hui::save::ensure_directory(data_dir);
+        sx::Session session;
+        if (!session.init(icons_dir + "/../..", data_dir, &rig.renderer))
+            return 1;
+        sx::Shell shell(env, session);
+        double seconds = 0.0;
+        const auto frame = [&](const hui::InputFrame &in) {
+            session.update(kDt, shell.cursor());
+            env.clock = session.clock;
+            shell.update(in, kDt);
+            seconds += kDt;
+            std::this_thread::sleep_for(std::chrono::milliseconds(16));
+        };
+        const auto run_for = [&](int frames) {
+            for (int i = 0; i < frames; ++i)
+                frame(idle_input());
+        };
+        const auto look = [&](const char *name) {
+            hui::gfx::DrawList list;
+            hui::gfx::BackdropSpec backdrop;
+            shell.draw(list, backdrop);
+            rig.shot(name, backdrop, list);
+        };
+        std::fprintf(stderr, "start: sign-in screen asked for: %d\n", session.sign_in_screen ? 1 : 0);
+        run_for(60);
+        look("start-1-boot");
+        for (int i = 0; i < 15 * 60 && !session.boot_ready(); ++i)
+            frame(idle_input());
+        std::size_t ready = 0;
+        for (const std::uint32_t id : session.wall)
+            ready += id != 0 ? 1 : 0;
+        std::fprintf(stderr, "start: ready after %.1f s: qr %s, code '%s', wall %zu posters (%zu there), rows %zu\n", seconds,
+                     session.sign_in.qr != 0 ? "yes" : "no", session.sign_in.code.c_str(), session.wall.size(), ready,
+                     session.board.rows.size());
+        run_for(14);
+        look("start-2-handoff");
+        run_for(46);
+        look("start-3-sign-in");
+        run_for(120);
+        look("start-4-two-seconds-later");
+        hui::InputFrame circle = idle_input();
+        circle.pressed = hui::action_bit(hui::Action::back);
+        frame(circle);
+        std::fprintf(stderr, "start: after Circle: sign-in screen %d, sign-in open %d\n", session.sign_in_screen ? 1 : 0,
+                     session.sign_in_open ? 1 : 0);
+        run_for(5);
+        look("start-5-leaving");
+        run_for(90);
+        look("start-6-board");
+        session.shutdown();
+    }
+    // Moving the Board's cursor to a title whose wallpaper arrives late: the old one stays up until the new one is there,
+    // then blends over half a second. Measured on the wallpaper's own part of the screen. Not part of "all".
+    if (only == "wallfade")
+    {
+        sx::BoardContent content;
+        if (!sx::preview::load_board(rig.renderer, art, &content))
+            return 1;
+        const std::uint32_t tex_a = content.rows[0].items[0].backdrop, tex_b = content.rows[0].items[1].backdrop;
+        bool all_good = true;
+        for (int row = 0; row < 2; ++row)
+        {
+            // The focused title's wallpaper changes from A to B, B arriving late (the cursor stays, so nothing else moves).
+            const auto make = [&](std::uint32_t id) {
+                content.rows[static_cast<std::size_t>(row)].items[0].backdrop = id;
+            };
+            const auto draw_mean = [&](sx::Board &board) {
+                hui::gfx::DrawList list;
+                hui::gfx::BackdropSpec backdrop;
+                board.draw(list, backdrop);
+                if (rig.sync)
+                    rig.sync();
+                rig.renderer.begin();
+                rig.renderer.backdrop(backdrop);
+                rig.renderer.draw(list);
+                glBindFramebuffer(GL_FRAMEBUFFER, rig.framebuffer);
+                glClearColor(0, 0, 0, 1);
+                glClear(GL_COLOR_BUFFER_BIT);
+                rig.renderer.present(rig.framebuffer, rig.width, rig.height);
+                glBindFramebuffer(GL_FRAMEBUFFER, rig.framebuffer);
+                glReadPixels(0, 0, rig.width, rig.height, GL_RGBA, GL_UNSIGNED_BYTE, rig.pixels.data());
+                double sum = 0;
+                int n = 0;
+                for (int y = 0; y < rig.height; y += 6)
+                    for (int x = 0; x < rig.width; x += 6)
+                    {
+                        const unsigned char *px = &rig.pixels[(static_cast<std::size_t>(y) * rig.width + x) * 4];
+                        sum += 0.2126 * px[0] + 0.7152 * px[1] + 0.0722 * px[2];
+                        ++n;
+                    }
+                return sum / n;
+            };
+            const auto start_board = [&](sx::Board &board) {
+                board.set_content(&content);
+                board.enter();
+                settle(board, 90);
+                if (row == 1)
+                {
+                    hui::InputFrame down = idle_input();
+                    down.nav = hui::Direction::down;
+                    board.update(down, kDt);
+                }
+                settle(board, 150);
+            };
+            // What the screen is when B has been the wallpaper all along.
+            make(tex_b);
+            double fresh_b = 0;
+            {
+                sx::Board fresh(env);
+                start_board(fresh);
+                fresh_b = draw_mean(fresh);
+            }
+            make(tex_a);
+            sx::Board board(env);
+            start_board(board);
+            std::vector<double> lum;
+            lum.push_back(draw_mean(board));
+            const double before = lum.back();
+            make(0); // the next picture is not here yet
+            for (int i = 0; i < 40; ++i)
+            {
+                board.update(idle_input(), kDt);
+                lum.push_back(draw_mean(board));
+            }
+            const std::size_t arrived_at = lum.size();
+            make(tex_b);
+            for (int i = 0; i < 60; ++i)
+            {
+                board.update(idle_input(), kDt);
+                lum.push_back(draw_mean(board));
+            }
+            const double after = lum.back();
+            double held = 0, outside = 0, biggest = 0;
+            for (std::size_t i = 0; i < arrived_at; ++i)
+                held = std::max(held, std::fabs(lum[i] - before));
+            for (std::size_t i = arrived_at; i < lum.size(); ++i)
+            {
+                outside = std::max(outside, std::max(std::min(before, after) - lum[i], lum[i] - std::max(before, after)));
+                if (i > arrived_at)
+                    biggest = std::max(biggest, std::fabs(lum[i] - lum[i - 1]));
+            }
+            const double change = std::fabs(after - before);
+            std::printf("wallfade row %d: A %.2f -> B %.2f (B all along: %.2f), held-up deviation %.3f, outside range %.3f, last step %.3f, "
+                        "biggest step %.3f of %.2f\n",
+                        row, before, after, fresh_b, held, outside, std::fabs(lum.back() - lum[lum.size() - 2]), biggest, change);
+            const bool good = change > 1.0 && held < 0.05 && outside < 0.05 * change + 0.05 &&
+                              std::fabs(after - fresh_b) < 0.02 * change + 0.02 && biggest < 0.2 * change;
+            std::printf(good ? "wallfade row %d OK\n" : "wallfade row %d FAILED\n", row);
+            all_good = all_good && good;
+        }
+        if (!all_good)
+            return 1;
+    }
+    // The sign-in approved on the phone (simulated): the boot animation must come back and stay until the account's Board
+    // has answered, for at least 2.5 s, then lift onto Home. Not part of "all".
+    if (only == "startlogin")
+    {
+        const char *home = std::getenv("HOME");
+        const std::string data_dir = std::string(home ? home : "/tmp") + "/signin-data";
+        std::filesystem::remove_all(data_dir);
+        hui::save::ensure_directory(data_dir);
+        sx::Session session;
+        if (!session.init(icons_dir + "/../..", data_dir, &rig.renderer))
+            return 1;
+        sx::Shell shell(env, session);
+        double seconds = 0;
+        const auto frame = [&](const hui::InputFrame &in) {
+            session.update(kDt, shell.cursor());
+            env.clock = session.clock;
+            shell.update(in, kDt);
+            seconds += kDt;
+            std::this_thread::sleep_for(std::chrono::milliseconds(16));
+        };
+        const auto look = [&](const char *name) {
+            hui::gfx::DrawList list;
+            hui::gfx::BackdropSpec backdrop;
+            shell.draw(list, backdrop);
+            rig.shot(name, backdrop, list);
+        };
+        for (int i = 0; i < 15 * 60 && !session.boot_ready(); ++i)
+            frame(idle_input());
+        for (int i = 0; i < 90; ++i)
+            frame(idle_input());
+        look("login-1-sign-in");
+        sx::preview::test_login_done(session, "test-key");
+        const double signed_at = seconds;
+        for (int i = 0; i < 20; ++i)
+            frame(idle_input());
+        std::fprintf(stderr, "login: 0.3 s after sign-in: boot_ready %d\n", session.boot_ready() ? 1 : 0);
+        look("login-2-boot-again");
+        for (int i = 0; i < 12 * 60 && !session.boot_ready(); ++i)
+            frame(idle_input());
+        std::fprintf(stderr, "login: the wait lasted %.1f s\n", seconds - signed_at);
+        for (int i = 0; i < 20; ++i)
+            frame(idle_input());
+        look("login-3-lifting");
+        for (int i = 0; i < 90; ++i)
+            frame(idle_input());
+        look("login-4-board");
+        session.shutdown();
+    }
+    // Circle on the sign-in screen the moment it can be pressed, before the Board is ready: the boot animation must come
+    // back until the Board is, then lift onto it. Not part of "all".
+    if (only == "startquick")
+    {
+        const char *home = std::getenv("HOME");
+        const std::string data_dir = std::string(home ? home : "/tmp") + "/signin-data";
+        std::filesystem::remove_all(data_dir);
+        hui::save::ensure_directory(data_dir);
+        sx::Session session;
+        if (!session.init(icons_dir + "/../..", data_dir, &rig.renderer))
+            return 1;
+        sx::Shell shell(env, session);
+        const auto frame = [&](const hui::InputFrame &in) {
+            session.update(kDt, shell.cursor());
+            env.clock = session.clock;
+            shell.update(in, kDt);
+            std::this_thread::sleep_for(std::chrono::milliseconds(16));
+        };
+        const auto look = [&](const char *name) {
+            hui::gfx::DrawList list;
+            hui::gfx::BackdropSpec backdrop;
+            shell.draw(list, backdrop);
+            rig.shot(name, backdrop, list);
+        };
+        for (int i = 0; i < 15 * 60 && !session.boot_ready(); ++i)
+            frame(idle_input());
+        for (int i = 0; i < 24; ++i)
+            frame(idle_input());
+        look("quick-1-sign-in");
+        hui::InputFrame circle = idle_input();
+        circle.pressed = hui::action_bit(hui::Action::back);
+        frame(circle);
+        std::fprintf(stderr, "quick: Circle pressed; boot_ready %d, rows %zu\n", session.boot_ready() ? 1 : 0, session.board.rows.size());
+        for (int i = 0; i < 12; ++i)
+            frame(idle_input());
+        look("quick-2-just-after");
+        int frames = 0;
+        for (; frames < 12 * 60 && !session.boot_ready(); ++frames)
+            frame(idle_input());
+        std::fprintf(stderr, "quick: waited %.2f s more for the Board\n", frames / 60.0);
+        look("quick-3-waiting-ended");
+        for (int i = 0; i < 20; ++i)
+            frame(idle_input());
+        look("quick-4-lifting");
+        for (int i = 0; i < 90; ++i)
+            frame(idle_input());
+        look("quick-5-board");
         session.shutdown();
     }
     // Playing a real stream (needs the network): opens one title through the session,
@@ -995,6 +1521,25 @@ int main(int argc, char **argv)
             rig.shot("overlay-2-sign-in", backdrop, list);
         }
         {
+            // Torbox's code sign-in: the same dialog, its own title and a longer code.
+            sx::Settings page(env);
+            page.set_content(&settings);
+            page.enter();
+            settle(page, 90);
+            hui::gfx::DrawList list;
+            hui::gfx::BackdropSpec backdrop;
+            page.draw(list, backdrop);
+            sx::SignInState in;
+            in.title = "Connect Torbox";
+            in.logo = false;
+            in.qr = sx::preview::load_texture(rig.renderer, art + "/qr.png");
+            in.link = "tor.box/link";
+            in.code = "ABCD-1234";
+            in.status = "Waiting for you to approve it on your phone or computer...";
+            sx::draw_sign_in(list, env, in, 0.7f, 1.0f);
+            rig.shot("overlay-2b-torbox", backdrop, list);
+        }
+        {
             sx::Library page(env);
             page.set_content(&library);
             page.enter();
@@ -1138,7 +1683,7 @@ int main(int argc, char **argv)
         glBindFramebuffer(GL_FRAMEBUFFER, rig.framebuffer);
         glClearColor(0, 0, 0, 1);
         glClear(GL_COLOR_BUFFER_BIT);
-        if (!sx::hdr::present(rig.renderer, W, H, tex, rect, rig.framebuffer))
+        if (!sx::hdr::present(rig.renderer, W, H, tex, nullptr, rect, rig.framebuffer))
         {
             std::fprintf(stderr, "HDR TEST: present failed\n");
             return 1;
@@ -1156,13 +1701,43 @@ int main(int argc, char **argv)
             const std::uint32_t w = at(x, y);
             std::fprintf(stderr, "HDR TEST %-22s R %4u G %4u B %4u A %u\n", name, w & 1023, (w >> 10) & 1023, (w >> 20) & 1023, w >> 30);
         };
+        const std::uint32_t keep_v = at(1000, 300), keep_o = at(300, 800), keep_u = at(200, 200);
         show("video (expect 600 300 900)", 1000, 300);
         show("outside video (expect 0)", 300, 800);
         show("white UI (expect ~594)", 200, 200);
         show("half UI over video", 700, 500);
         show("video top-left corner", 485, 275);
-        const std::uint32_t v = at(1000, 300), o = at(300, 800), u = at(200, 200);
-        const bool ok = (v & 1023) == 600 && ((v >> 10) & 1023) == 300 && ((v >> 20) & 1023) == 900 && (v >> 30) == 3 && (o & 1023) == 0 &&
+        // The same through the planes path: Y 573 (limited range, 0.581 of the signal) with neutral colour: PQ grey 594.
+        auto planes_test = [&](const char *name, bool high, bool hlg, int y10, int expect) {
+            const int pw = 960, ph = 540;
+            std::vector<std::uint16_t> yp(static_cast<std::size_t>(pw) * ph, static_cast<std::uint16_t>(y10 << (high ? 6 : 0)));
+            std::vector<std::uint16_t> uvp(static_cast<std::size_t>(pw / 2) * (ph / 2) * 2, static_cast<std::uint16_t>(512 << (high ? 6 : 0)));
+            sx::hdr::VideoPlanes planes;
+            planes.high_aligned = high;
+            planes.hlg = hlg;
+            if (!sx::hdr::planes_upload(&planes, pw, ph, yp.data(), uvp.data()))
+            {
+                std::fprintf(stderr, "HDR TEST %s: planes failed\n", name);
+                return false;
+            }
+            hui::gfx::DrawList empty;
+            rig.renderer.begin();
+            glBindFramebuffer(GL_FRAMEBUFFER, rig.framebuffer);
+            glClear(GL_COLOR_BUFFER_BIT);
+            if (!sx::hdr::present(rig.renderer, W, H, 0, &planes, rect, rig.framebuffer))
+                return false;
+            glBindFramebuffer(GL_FRAMEBUFFER, rig.framebuffer);
+            glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+            const std::uint32_t w = at(1000, 300);
+            const int r = int(w & 1023), g = int((w >> 10) & 1023), b = int((w >> 20) & 1023);
+            std::fprintf(stderr, "HDR TEST planes %-28s R %4d G %4d B %4d (expect ~%d)\n", name, r, g, b, expect);
+            return std::abs(r - expect) <= 3 && std::abs(g - expect) <= 3 && std::abs(b - expect) <= 3;
+        };
+        bool planes_ok = planes_test("HDR10 low-aligned", false, false, 573, 594);
+        planes_ok = planes_test("HDR10 high-aligned", true, false, 573, 594) && planes_ok;
+        planes_ok = planes_test("HLG reference white", false, true, 721, 594) && planes_ok;
+        const std::uint32_t v = keep_v, o = keep_o, u = keep_u;
+        const bool ok = planes_ok && (v & 1023) == 600 && ((v >> 10) & 1023) == 300 && ((v >> 20) & 1023) == 900 && (v >> 30) == 3 && (o & 1023) == 0 &&
                         std::abs(int(u & 1023) - 594) <= 4;
         std::fprintf(stderr, ok ? "HDR TEST OK\n" : "HDR TEST FAIL\n");
         return ok ? 0 : 1;

@@ -6,9 +6,28 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <map>
 
 namespace sx
 {
+
+namespace
+{
+
+// A font file is read once, however many chains use it (the CJK faces are several megabytes).
+std::shared_ptr<const std::string> read_font_file(const std::string &path)
+{
+    static std::map<std::string, std::weak_ptr<const std::string>> cache;
+    if (const auto found = cache[path].lock())
+        return found;
+    auto data = std::make_shared<std::string>();
+    if (!hui::save::read_file(path, data.get()))
+        return nullptr;
+    cache[path] = data;
+    return data;
+}
+
+} // namespace
 
 bool TtfChain::load(const std::string &font_dir, const std::vector<FaceSpec> &specs)
 {
@@ -16,14 +35,15 @@ bool TtfChain::load(const std::string &font_dir, const std::vector<FaceSpec> &sp
     for (const FaceSpec &spec : specs)
     {
         auto face = std::make_unique<Face>();
-        if (!hui::save::read_file(font_dir + "/" + spec.file, &face->data))
+        face->data = read_font_file(font_dir + "/" + spec.file);
+        if (face->data == nullptr)
         {
             std::fprintf(stderr, "font: cannot read %s\n", spec.file.c_str());
             if (faces_.empty())
                 return false;
             continue;
         }
-        const unsigned char *bytes = reinterpret_cast<const unsigned char *>(face->data.data());
+        const unsigned char *bytes = reinterpret_cast<const unsigned char *>(face->data->data());
         if (!stbtt_InitFont(&face->info, bytes, stbtt_GetFontOffsetForIndex(bytes, 0)))
         {
             std::fprintf(stderr, "font: cannot parse %s\n", spec.file.c_str());
@@ -110,13 +130,13 @@ void prewarm(const hui::gfx::Font &font)
 }
 
 bool make(hui::gfx::Renderer &renderer, hui::gfx::Font *font, TtfChain *chain, const std::string &dir,
-          const std::vector<FaceSpec> &faces, hui::ui::FontRef *ref)
+          const std::vector<FaceSpec> &faces, hui::ui::FontRef *ref, int atlas_size)
 {
     if (!chain->load(dir, faces))
         return false;
     float ascent = 0, descent = 0, gap = 0;
     chain->metrics(&ascent, &descent, &gap);
-    font->init_dynamic(chain, chain->pixel_size(), chain->sdf_range(), ascent, descent, gap, 2048);
+    font->init_dynamic(chain, chain->pixel_size(), chain->sdf_range(), ascent, descent, gap, atlas_size);
     font->set_text_transform(&shape_text);
     prewarm(*font);
     ref->font = font;
@@ -141,19 +161,34 @@ bool load_baked(hui::gfx::Renderer &renderer, const std::string &path, hui::gfx:
 bool load_ui_fonts(hui::gfx::Renderer &renderer, const std::string &font_dir, const std::string &baked_dir,
                    UiFonts *out, hui::ui::Fonts *fonts)
 {
-    // Noto Sans and Naskh are drawn a little larger than Inter's em so the
-    // three scripts sit at the same visual size in a line.
+    // Noto Sans, Naskh and the others are drawn a little larger or smaller than Inter's em so the scripts sit at the
+    // same visual size in a line. Hebrew, Thai and Chinese/Japanese/Korean come last: Inter and Noto Sans answer
+    // for their letters first. The CJK faces are one weight (Medium) for all three chains; where Japanese and
+    // Chinese share a character, the Japanese form is drawn.
+    const auto extra = [](bool bold) {
+        return std::vector<FaceSpec>{{"NotoNaskhArabicUI-" + std::string(bold ? "Bold" : "Regular") + ".ttf", 1.12f},
+                                     {"NotoSansHebrew-" + std::string(bold ? "Bold" : "Regular") + ".ttf"},
+                                     {"NotoSansThai-" + std::string(bold ? "Bold" : "Regular") + ".ttf", 1.08f},
+                                     {"NotoSansJP-Subset.ttf", 0.94f},
+                                     {"NotoSansSC-Subset.ttf", 0.94f},
+                                     {"NotoSansTC-Subset.ttf", 0.94f},
+                                     {"NotoSansKR-Subset.ttf", 0.94f}};
+    };
+    const auto chain = [&](std::vector<FaceSpec> head, bool bold) {
+        const std::vector<FaceSpec> tail = extra(bold);
+        head.insert(head.end(), tail.begin(), tail.end());
+        return head;
+    };
+    // The atlases start empty and fill with the glyphs a screen needs; a film in Japanese uses thousands, so the
+    // semibold one (subtitles) is the largest. A full atlas starts over (hui font.cpp).
     const bool ok =
         make(renderer, &out->regular, &out->regular_chain, font_dir,
-             {{"Inter-Regular.ttf"}, {"NotoSans-Regular.ttf"}, {"NotoNaskhArabicUI-Regular.ttf", 1.12f}},
-             &fonts->regular) &&
+             chain({{"Inter-Regular.ttf"}, {"NotoSans-Regular.ttf"}}, false), &fonts->regular, 2048) &&
         make(renderer, &out->semibold, &out->semibold_chain, font_dir,
-             {{"Inter-SemiBold.ttf"}, {"NotoSans-Bold.ttf"}, {"NotoNaskhArabicUI-Bold.ttf", 1.12f}},
-             &fonts->semibold) &&
+             chain({{"Inter-SemiBold.ttf"}, {"NotoSans-Bold.ttf"}}, true), &fonts->semibold, 4096) &&
         make(renderer, &out->display, &out->display_chain, font_dir,
-             {{"Montserrat-Medium.ttf"}, {"Inter-SemiBold.ttf"}, {"NotoSans-Bold.ttf"},
-              {"NotoNaskhArabicUI-Bold.ttf", 1.12f}},
-             &fonts->display);
+             chain({{"Montserrat-Medium.ttf"}, {"Inter-SemiBold.ttf"}, {"NotoSans-Bold.ttf"}}, true), &fonts->display,
+             2048);
     if (!ok)
         return false;
     // Only ASCII is ever drawn with these.

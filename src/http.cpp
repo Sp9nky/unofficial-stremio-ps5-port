@@ -4,6 +4,8 @@
 
 #include "util.h"
 
+#include <mutex>
+
 const char* kUserAgent = "Mozilla/5.0 (PlayStation; PlayStation 5/1.00) Stremio-PS5/1.0";
 
 static std::string g_ca_bundle;
@@ -14,8 +16,22 @@ std::string HttpResponse::describe() const {
 	return "HTTP " + std::to_string(status);
 }
 
+// What the kept-open connections (HttpSession) share between threads: looked-up addresses and TLS sessions, so a
+// second connection to a host resumes the first one's TLS session instead of a full handshake.
+static CURLSH* g_share = nullptr;
+static std::mutex g_share_locks[CURL_LOCK_DATA_LAST];
+static void share_lock(CURL*, curl_lock_data data, curl_lock_access, void*) { g_share_locks[data].lock(); }
+static void share_unlock(CURL*, curl_lock_data data, void*) { g_share_locks[data].unlock(); }
+
 void http_init(const std::string& ca_bundle_path) {
 	curl_global_init(CURL_GLOBAL_ALL);
+	g_share = curl_share_init();
+	if (g_share) {
+		curl_share_setopt(g_share, CURLSHOPT_LOCKFUNC, share_lock);
+		curl_share_setopt(g_share, CURLSHOPT_UNLOCKFUNC, share_unlock);
+		curl_share_setopt(g_share, CURLSHOPT_SHARE, CURL_LOCK_DATA_DNS);
+		curl_share_setopt(g_share, CURLSHOPT_SHARE, CURL_LOCK_DATA_SSL_SESSION);
+	}
 	g_ca_bundle = ca_bundle_path;
 	dlog("curl %s, CA bundle %s (%s)", curl_version(), ca_bundle_path.c_str(),
 	     file_exists(ca_bundle_path) ? "found" : "MISSING");
@@ -53,14 +69,9 @@ static int progress_cb(void* clientp, curl_off_t, curl_off_t, curl_off_t, curl_o
 	return (cancel && cancel->load()) ? 1 : 0;
 }
 
-static HttpResponse perform(const std::string& url, const std::string* post_body, long timeout_s,
-                            const std::atomic<bool>* cancel, const std::vector<std::string>& headers) {
+static HttpResponse perform_on(CURL* c, bool shared, const std::string& url, const std::string* post_body,
+                               long timeout_s, const std::atomic<bool>* cancel, const std::vector<std::string>& headers) {
 	HttpResponse r;
-	CURL* c = curl_easy_init();
-	if (!c) {
-		r.error = "curl_easy_init failed";
-		return r;
-	}
 	char errbuf[CURL_ERROR_SIZE] = {0};
 	struct curl_slist* hdrs = nullptr;
 	for (auto& h : headers) hdrs = curl_slist_append(hdrs, h.c_str());
@@ -81,6 +92,7 @@ static HttpResponse perform(const std::string& url, const std::string* post_body
 	curl_easy_setopt(c, CURLOPT_WRITEDATA, &r.body);
 	if (!g_ca_bundle.empty() && file_exists(g_ca_bundle)) curl_easy_setopt(c, CURLOPT_CAINFO, g_ca_bundle.c_str());
 	http_setup_handle(c);
+	if (shared && g_share) curl_easy_setopt(c, CURLOPT_SHARE, g_share);
 	if (cancel) {
 		curl_easy_setopt(c, CURLOPT_NOPROGRESS, 0L);
 		curl_easy_setopt(c, CURLOPT_XFERINFOFUNCTION, progress_cb);
@@ -106,8 +118,35 @@ static HttpResponse perform(const std::string& url, const std::string* post_body
 	char* ct = nullptr;
 	if (curl_easy_getinfo(c, CURLINFO_CONTENT_TYPE, &ct) == CURLE_OK && ct) r.content_type = ct;
 	if (hdrs) curl_slist_free_all(hdrs);
+	return r;
+}
+
+static HttpResponse perform(const std::string& url, const std::string* post_body, long timeout_s,
+                            const std::atomic<bool>* cancel, const std::vector<std::string>& headers) {
+	CURL* c = curl_easy_init();
+	if (!c) {
+		HttpResponse r;
+		r.error = "curl_easy_init failed";
+		return r;
+	}
+	HttpResponse r = perform_on(c, false, url, post_body, timeout_s, cancel, headers);
 	curl_easy_cleanup(c);
 	return r;
+}
+
+HttpSession::~HttpSession() {
+	if (curl_) curl_easy_cleanup(static_cast<CURL*>(curl_));
+}
+
+HttpResponse HttpSession::get(const std::string& url, long timeout_s, const std::vector<std::string>& headers) {
+	if (!curl_) curl_ = curl_easy_init();
+	else curl_easy_reset(static_cast<CURL*>(curl_));  // the options go; the open connections stay
+	if (!curl_) {
+		HttpResponse r;
+		r.error = "curl_easy_init failed";
+		return r;
+	}
+	return perform_on(static_cast<CURL*>(curl_), true, url, nullptr, timeout_s, nullptr, headers);
 }
 
 HttpResponse http_get(const std::string& url, long timeout_s, const std::atomic<bool>* cancel,
@@ -118,6 +157,66 @@ HttpResponse http_get(const std::string& url, long timeout_s, const std::atomic<
 HttpResponse http_post_json(const std::string& url, const std::string& body, long timeout_s,
                             const std::atomic<bool>* cancel) {
 	return perform(url, &body, timeout_s, cancel, {});
+}
+
+HttpResponse http_request(const HttpRequest& q) {
+	HttpResponse r;
+	CURL* c = curl_easy_init();
+	if (!c) {
+		r.error = "curl_easy_init failed";
+		return r;
+	}
+	char errbuf[CURL_ERROR_SIZE] = {0};
+	struct curl_slist* hdrs = nullptr;
+	for (auto& h : q.headers) hdrs = curl_slist_append(hdrs, h.c_str());
+	if (!q.body.empty() && !q.content_type.empty()) hdrs = curl_slist_append(hdrs, ("Content-Type: " + q.content_type).c_str());
+	curl_mime* mime = nullptr;
+	curl_easy_setopt(c, CURLOPT_URL, q.url.c_str());
+	curl_easy_setopt(c, CURLOPT_USERAGENT, kUserAgent);
+	curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L);
+	curl_easy_setopt(c, CURLOPT_MAXREDIRS, 8L);
+	curl_easy_setopt(c, CURLOPT_ACCEPT_ENCODING, "");
+	curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 10L);
+	curl_easy_setopt(c, CURLOPT_TIMEOUT, q.timeout_s);
+	curl_easy_setopt(c, CURLOPT_NOSIGNAL, 1L);
+	curl_easy_setopt(c, CURLOPT_IPRESOLVE, CURL_IPRESOLVE_V4);
+	curl_easy_setopt(c, CURLOPT_ERRORBUFFER, errbuf);
+	curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, write_cb);
+	curl_easy_setopt(c, CURLOPT_WRITEDATA, &r.body);
+	if (!g_ca_bundle.empty() && file_exists(g_ca_bundle)) curl_easy_setopt(c, CURLOPT_CAINFO, g_ca_bundle.c_str());
+	http_setup_handle(c);
+	if (q.cancel) {
+		curl_easy_setopt(c, CURLOPT_NOPROGRESS, 0L);
+		curl_easy_setopt(c, CURLOPT_XFERINFOFUNCTION, progress_cb);
+		curl_easy_setopt(c, CURLOPT_XFERINFODATA, (void*)q.cancel);
+	}
+	if (hdrs) curl_easy_setopt(c, CURLOPT_HTTPHEADER, hdrs);
+	if (q.method == "POST") curl_easy_setopt(c, CURLOPT_POST, 1L);
+	else if (q.method != "GET") curl_easy_setopt(c, CURLOPT_CUSTOMREQUEST, q.method.c_str());
+	if (!q.form.empty()) {
+		mime = curl_mime_init(c);
+		for (auto& f : q.form) {
+			curl_mimepart* part = curl_mime_addpart(mime);
+			curl_mime_name(part, f.first.c_str());
+			curl_mime_data(part, f.second.c_str(), CURL_ZERO_TERMINATED);
+		}
+		curl_easy_setopt(c, CURLOPT_MIMEPOST, mime);
+	} else if (q.method == "POST" || !q.body.empty()) {
+		curl_easy_setopt(c, CURLOPT_POSTFIELDS, q.body.c_str());
+		curl_easy_setopt(c, CURLOPT_POSTFIELDSIZE, long(q.body.size()));
+	}
+	CURLcode rc = curl_easy_perform(c);
+	if (rc != CURLE_OK) {
+		r.error = errbuf[0] ? errbuf : curl_easy_strerror(rc);
+		if (q.cancel && q.cancel->load()) r.error = "cancelled";
+	}
+	curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &r.status);
+	char* ct = nullptr;
+	if (curl_easy_getinfo(c, CURLINFO_CONTENT_TYPE, &ct) == CURLE_OK && ct) r.content_type = ct;
+	if (mime) curl_mime_free(mime);
+	if (hdrs) curl_slist_free_all(hdrs);
+	curl_easy_cleanup(c);
+	return r;
 }
 
 // ---------------------------------------------------------------------------

@@ -67,18 +67,33 @@ struct Meta {
 
 Meta parse_meta(const json& j);
 
+// What a debrid-aware addon says in a stream's "clientResolve": which service can turn it into a link (src/debrid.cpp).
+struct ClientResolve {
+	bool present = false;
+	std::string type, service, info_hash, magnet_uri, torrent_name, filename;
+	int file_idx = -1;
+	bool has_file_idx = false;
+	std::vector<std::string> sources;
+	int season = -1, episode = -1;
+	bool is_cached = false;
+};
+
 struct Stream {
 	std::string name, description;  // display
+	std::string title;              // the addon's "title" as sent (description falls back to it)
+	ClientResolve client_resolve;
+	std::string cache_state;        // Torbox's answer for a torrent-only stream: CACHED, NOT_CACHED, UNKNOWN or empty
 	std::string addon;              // addon name
 	std::string url;                // direct HTTP(S) URL
 	std::string info_hash;          // torrent
 	int file_idx = -1;
 	std::vector<std::string> sources;
 	std::string filename;
+	std::vector<std::string> file_must_include;  // regexes the played file's path must match (no fileIdx)
 	std::string binge_group;
 	bool not_web_ready = false;
 	std::vector<std::string> request_headers;  // behaviorHints.proxyHeaders.request
-	bool playable() const { return !url.empty() || !info_hash.empty(); }
+	bool playable() const { return !url.empty() || !info_hash.empty() || client_resolve.present; }
 };
 
 std::vector<Stream> parse_streams(const json& j, const std::string& addon_name);
@@ -105,6 +120,8 @@ ApiResult api_addon_collection(const std::string& auth_key);
 ApiResult api_library_get(const std::string& auth_key);
 ApiResult api_library_put(const std::string& auth_key, const json& items);
 ApiResult api_logout(const std::string& auth_key);
+// What stremio-core's send_watched does when a title passes the watched threshold (likes.stremio.com).
+bool api_send_watched(const std::string& auth_key, const std::string& media_id, const std::string& media_type);
 
 // Sign-in with a code approved on another device (link.stremio.com).
 struct LinkCode {

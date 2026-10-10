@@ -30,10 +30,13 @@ const int kRetries = 20;  // slow torrents: keep trying, as the PC app does (Cir
 const int64_t kParallelMin = 96ll << 20;
 const int64_t kChunk = 4ll << 20;
 const int kWindowRam = 32;
+// Nuvio PS5 keeps its read-ahead in memory only (evo_parallel_io.c: 32 pieces of 4 MB, 128 MB, in direct memory) and
+// never reads it back from a file. Reading the on-storage copy back gave this app about 0.5 MB/s on the console
+// (a 20 Mbit/s film starved with hundreds of MB downloaded), so the storage read-ahead is off: the code stays for
+// a day it is wanted again, but nothing opens the file.
+const bool kDiskCache = false;
 const int kWindowDisk = 1536;
 const int kWorkers = 6;
-// A streaming server may still be fetching that part of the torrent: be patient.
-const int kChunkAttempts = 20;
 const double kSpeedLogEvery = 30;
 
 std::string g_cache_dir;
@@ -85,6 +88,7 @@ NetStream::~NetStream() {
 		if (w.joinable()) w.join();
 	if (cache_) {
 		fclose(cache_);
+		if (cache_r_) fclose(cache_r_);
 		remove(cache_path_.c_str());
 	}
 }
@@ -110,6 +114,11 @@ void NetStream::log_speed(int64_t bytes) {  // m_ held
 		}
 		dlog("net: %.2f MB/s over %d connections, %lld MB downloaded ahead of the player%s", rate, kWorkers,
 		     (long long)(ahead * (kChunk >> 20)), cache_ ? "" : " (in memory)");
+		if (cache_ && disk_w_bytes_ > 0)
+			dlog("net: storage wrote %.0f MB at %.1f MB/s (slowest chunk %.0f ms), slowest read %.0f ms", double(disk_w_bytes_) / (1 << 20),
+			     double(disk_w_bytes_) / (1 << 20) / std::max(0.001, disk_w_s_), disk_w_max_ * 1000, disk_r_max_ * 1000);
+		disk_w_bytes_ = 0;
+		disk_w_s_ = disk_w_max_ = disk_r_max_ = 0;
 	} else {
 		dlog("net: %.2f MB/s over one connection", rate);
 	}
@@ -150,9 +159,18 @@ void NetStream::start_parallel() {  // m_ held
 	eof_ = false;
 	parallel_ = true;
 	window_ = kWindowRam;
-	if (!g_cache_dir.empty()) {
+	if (kDiskCache && !g_cache_dir.empty()) {
 		cache_path_ = g_cache_dir + "/stream-cache-" + std::to_string(g_cache_serial++ % 16) + ".bin";
 		cache_ = fopen(cache_path_.c_str(), "w+b");
+		if (cache_) {
+			cache_r_ = fopen(cache_path_.c_str(), "rb");  // unbuffered: what is read is what was written
+			if (cache_r_) setvbuf(cache_r_, nullptr, _IONBF, 0);
+			else {
+				fclose(cache_);
+				cache_ = nullptr;
+				remove(cache_path_.c_str());
+			}
+		}
 		if (cache_) window_ = kWindowDisk;
 		else dlog("net: can't create %s (errno %d); read-ahead in memory", cache_path_.c_str(), errno);
 	}
@@ -163,15 +181,21 @@ void NetStream::start_parallel() {  // m_ held
 	if (final_url_.empty()) final_url_ = url_;
 	for (int i = 0; i < kWorkers; i++) workers_.emplace_back([this] { worker(); });
 	dlog("net: %lld MB file, downloading with %d connections, up to %d MB ahead %s", (long long)(size_ >> 20),
-	     kWorkers, int(window_ * (kChunk >> 20)), cache_ ? "on storage" : "in memory");
+	     kWorkers, int(window_ * (kChunk >> 20)), cache_ ? "on storage" : "in memory (as Nuvio)");
 }
 
 // Storage failed (full, or refused): carry on with the read-ahead in memory.
 void NetStream::drop_disk_cache(const char* why) {  // m_ held
+	if (!cache_) return;  // already done (several threads can find it at once)
 	dlog("net: stream cache %s (errno %d); read-ahead in memory from now on", why, errno);
-	fclose(cache_);
+	{
+		std::lock_guard<std::mutex> w(io_w_);  // not while a chunk is being written or read
+		std::lock_guard<std::mutex> r(io_r_);
+		fclose(cache_);
+		if (cache_r_) fclose(cache_r_);
+		cache_ = cache_r_ = nullptr;
+	}
 	remove(cache_path_.c_str());
-	cache_ = nullptr;
 	window_ = kWindowRam;
 	chunks_.assign(size_t(window_), Chunk());
 	cv_.notify_all();
@@ -205,8 +229,8 @@ void NetStream::worker() {
 		int64_t pick = -1;
 		for (int64_t i = window_base_; i < window_base_ + window_ && i <= last; i++) {
 			Chunk& s = chunks_[size_t(i % window_)];
-			if (s.state == 1) continue;  // busy (this chunk, or an old one still finishing)
-			if (s.index == i && s.state == 2) continue;
+			if (s.state == 1 || s.state == 4) continue;  // busy (this chunk, or an old one still finishing or being written)
+			if (s.index == i && (s.state == 2 || s.state == 3)) continue;  // ready, or failed and waiting for the reader
 			if (s.index == i && now < s.retry_at) continue;
 			pick = i;
 			break;
@@ -222,7 +246,7 @@ void NetStream::worker() {
 			if (slot.index != pick) slot.attempts = 0;
 			slot.index = pick;
 			slot.state = 1;
-			slot.data.clear();
+			slot.data.reset();
 		}
 		int64_t from = pick * kChunk, to = std::min(size_, from + kChunk) - 1;
 		std::string url = final_url_;
@@ -270,30 +294,59 @@ void NetStream::worker() {
 		if (window_ != my_window || chunks_[si].index != pick) continue;  // not ours any more
 		Chunk& slot = chunks_[si];
 		if (rc == CURLE_OK && status == 206 && data.size() == size_t(to - from + 1)) {
-			if (cache_) {  // to storage, in this slot's place in the file
-				if (fseeko(cache_, off_t(si) * kChunk, SEEK_SET) != 0 ||
-				    fwrite(data.data(), 1, data.size(), cache_) != data.size() || fflush(cache_) != 0) {
+			slot.len = int64_t(data.size());
+			slot.data = std::make_shared<std::vector<uint8_t>>(std::move(data));
+			const std::shared_ptr<std::vector<uint8_t>> mine = slot.data;
+			par_bytes_ += to - from + 1;
+			if (cache_) {
+				// Ready at once, from memory, while it is written to storage with m_ let go: the reader and the other
+				// connections never wait for the disk.
+				slot.state = 4;
+				cv_.notify_all();
+				lock.unlock();
+				bool wrote;
+				const double t0 = now_seconds();
+				{
+					std::lock_guard<std::mutex> io(io_w_);
+					wrote = cache_ && fseeko(cache_, off_t(si) * kChunk, SEEK_SET) == 0 &&
+					        fwrite(mine->data(), 1, mine->size(), cache_) == size_t(to - from + 1) && fflush(cache_) == 0;
+				}
+				const double took = now_seconds() - t0;
+				lock.lock();
+				disk_w_bytes_ += to - from + 1;
+				disk_w_s_ += took;
+				disk_w_max_ = std::max(disk_w_max_, took);
+				if (!wrote) {
 					drop_disk_cache("write failed");
 					continue;
 				}
-				slot.len = int64_t(data.size());
+				if (cache_ && window_ == my_window && chunks_[si].index == pick && chunks_[si].state == 4) {
+					chunks_[si].state = 2;
+					chunks_[si].data.reset();  // on storage now
+				}
 			} else {
-				slot.data = std::move(data);
-				slot.len = int64_t(slot.data.size());
+				slot.state = 2;
 			}
-			slot.state = 2;
-			par_bytes_ += to - from + 1;
 			log_speed(to - from + 1);
 		} else {
 			slot.state = 0;
 			if (!stopped() && pick >= window_base_ && pick < window_base_ + window_) {
 				slot.attempts++;
-				slot.retry_at = now_seconds() + std::min(8, slot.attempts);
 				std::string why = status >= 400 ? "HTTP " + std::to_string(status)
 				                  : errbuf[0]    ? std::string(errbuf)
 				                                 : curl_easy_strerror(rc);
-				dlog("net: chunk %lld: %s (attempt %d)", (long long)pick, why.c_str(), slot.attempts);
-				if (slot.attempts >= kChunkAttempts || (status >= 400 && status < 500)) error_ = why;
+				if (slot.attempts <= 3 || slot.attempts % 15 == 0)
+					dlog("net: chunk %lld: %s (attempt %d)", (long long)pick, why.c_str(), slot.attempts);
+				// A piece that fails does not stop the stream: it is tried again, as Nuvio's parallel reader does
+				// (evo_parallel_io.c): up to three tries in a row, 0.2 s apart when the host refused or could not be
+				// reached (an HTTP 429 or 503, a dropped connection) and at once when part of it had arrived; then
+				// the piece is marked failed and stays so until the reader needs it, which asks for it again. The
+				// reader waits meanwhile and the player shows "buffering"; the viewer ends it with Circle.
+				if (slot.attempts % 3 == 0) {
+					slot.state = 3;
+				} else {
+					slot.retry_at = data.empty() ? now_seconds() + 0.2 : 0;
+				}
 			}
 		}
 		cv_.notify_all();
@@ -316,19 +369,39 @@ int NetStream::read_parallel(std::unique_lock<std::mutex>& lock, uint8_t* buf, i
 		}
 		size_t si = size_t(idx % window_);
 		Chunk& s = chunks_[si];
-		if (s.index == idx && s.state == 2) {
+		if (s.index == idx && (s.state == 2 || s.state == 4)) {
 			size_t off = size_t(pos_ - idx * kChunk);
 			size_t k = std::min(size_t(n), size_t(s.len) - off);
-			if (cache_) {
-				if (fseeko(cache_, off_t(si) * kChunk + off_t(off), SEEK_SET) != 0 || fread(buf, 1, k, cache_) != k) {
+			if (s.data) {  // in memory (not on storage yet, or no storage)
+				memcpy(buf, s.data->data() + off, k);
+			} else {
+				// On storage: read it with m_ let go, so a slow disk holds nobody else up.
+				FILE* rf = cache_r_;
+				const off_t at = off_t(si) * kChunk + off_t(off);
+				lock.unlock();
+				bool ok;
+				const double t0 = now_seconds();
+				{
+					std::lock_guard<std::mutex> io(io_r_);
+					ok = cache_r_ == rf && rf && fseeko(rf, at, SEEK_SET) == 0 && fread(buf, 1, k, rf) == k;
+				}
+				const double took = now_seconds() - t0;
+				lock.lock();
+				disk_r_max_ = std::max(disk_r_max_, took);
+				if (!ok) {
+					if (cache_ == nullptr) continue;  // dropped meanwhile: look again
 					drop_disk_cache("read failed");
 					continue;  // fetched again, into memory
 				}
-			} else {
-				memcpy(buf, s.data.data() + off, k);
 			}
 			pos_ += int64_t(k);
 			return int(k);
+		}
+		if (s.index == idx && s.state == 3) {  // failed: ask for it again (Nuvio: the read fails, the demuxer reads again)
+			s.state = 0;
+			s.attempts = 0;
+			s.retry_at = 0;
+			cv_.notify_all();
 		}
 		if (!error_.empty()) return AVERROR(EIO);
 		cv_.wait_for(lock, std::chrono::milliseconds(100));

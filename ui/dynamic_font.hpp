@@ -3,9 +3,10 @@
 // ASCII-only atlases. Titles, names and subtitles come from addons in any
 // language, so a face is a chain: the first file that has a character draws it.
 //
-//   regular   Inter Regular   -> Noto Sans -> Noto Naskh Arabic UI
-//   semibold  Inter SemiBold  -> Noto Sans Bold -> Noto Naskh Arabic UI Bold
-//   display   Montserrat      -> Inter SemiBold -> Noto Sans Bold -> Naskh Bold
+//   regular   Inter Regular   -> Noto Sans -> Naskh Arabic UI -> Hebrew -> Thai -> JP, SC, TC, KR
+//   semibold  Inter SemiBold  -> Noto Sans Bold -> the same in bold
+//   display   Montserrat      -> Inter SemiBold -> Noto Sans Bold -> the same in bold
+// (JP, SC, TC and KR are subsets of Noto Sans CJK, one weight for all chains.)
 //
 // Right-to-left text (Arabic, Hebrew) is reordered and its letters joined by
 // FriBidi (src/bidi.cpp) before it is measured or drawn.
@@ -56,7 +57,7 @@ class TtfChain : public hui::gfx::GlyphSource
   private:
     struct Face
     {
-        std::string data;
+        std::shared_ptr<const std::string> data;
         stbtt_fontinfo info{};
         float size_scale = 1.0f;
     };

@@ -39,6 +39,12 @@ struct Stats {
 	bool incoming = false;        // the router forwards our port: peers can connect to us
 	double download_rate = 0;     // bytes per second
 	double file_progress = 0;     // 0..1 of the selected file downloaded so far
+	// The server's stats.json names (stremio-core's Statistics), for the log:
+	int unchoked = 0;             // peers that let us download
+	int queued = 0;               // block requests waiting for an answer
+	bool swarm_paused = false;    // nobody is watching: not downloading
+	bool peer_search_running = false;  // looking for more peers
+	bool stable = false;          // at least btMinPeersForStable peers are unchoked
 };
 
 struct Torrent;
@@ -79,8 +85,10 @@ public:
 	         const std::atomic<bool>* abort);
 
 	// Picks the file to play: by season/episode in the name for a series,
-	// else the largest video. -1 when there's no file.
-	static int guess_file(const std::vector<FileInfo>& files, int season, int episode);
+	// else the largest video. must_include: regexes (case-insensitive) the file's path must match, as the
+	// stream's fileMustInclude says; ignored when no file matches them. -1 when there's no file.
+	static int guess_file(const std::vector<FileInfo>& files, int season, int episode,
+	                      const std::vector<std::string>& must_include = {});
 };
 
 }  // namespace bt

@@ -4,7 +4,11 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
+#include <string>
+#include <utility>
+#include <vector>
 
 namespace sx
 {
@@ -26,6 +30,83 @@ std::string clock_text(double seconds)
         std::snprintf(out, sizeof(out), "%ld:%02ld:%02ld", total / 3600, total / 60 % 60, total % 60);
     else
         std::snprintf(out, sizeof(out), "%ld:%02ld", total / 60, total % 60);
+    return out;
+}
+
+
+bool no_break_before(std::uint32_t cp)
+{
+    return cp == 0x3001 || cp == 0x3002 || cp == 0x3005 || cp == 0x3009 || cp == 0x300b || cp == 0x300d ||
+           cp == 0x300f || cp == 0x3011 || cp == 0x30fc || cp == 0xff01 || cp == 0xff09 || cp == 0xff0c ||
+           cp == 0xff0e || cp == 0xff1a || cp == 0xff1b || cp == 0xff1f || cp == 0x2026 ||
+           cp == 0x0e31 || (cp >= 0x0e34 && cp <= 0x0e3a) ||
+           (cp >= 0x0e47 && cp <= 0x0e4e);
+}
+
+bool no_break_after(std::uint32_t cp)
+{
+    return cp == 0x3008 || cp == 0x300a || cp == 0x300c || cp == 0x300e || cp == 0x3010 || cp == 0xff08 ||
+           (cp >= 0x0e40 && cp <= 0x0e44);
+}
+
+// Scripts written without spaces between words: a line may break between any two of their characters.
+bool breaks_anywhere(std::uint32_t cp)
+{
+    return (cp >= 0x3040 && cp <= 0x9fff) || (cp >= 0xac00 && cp <= 0xd7af) || (cp >= 0xf900 && cp <= 0xfaff) ||
+           (cp >= 0xff00 && cp <= 0xff60) || (cp >= 0x0e00 && cp <= 0x0e7f);
+}
+
+// One subtitle line cut into lines that fit `max_width`, in logical order (each is put in display order when drawn):
+// at spaces, and between characters of scripts written without them, never in front of closing punctuation.
+std::vector<std::string> wrap_line(const hui::gfx::Font &font, const std::string &line, float size, float max_width)
+{
+    if (font.measure(line, size) <= max_width)
+        return {line};
+    std::vector<std::pair<std::uint32_t, std::string>> chars;
+    for (std::size_t i = 0; i < line.size();)
+    {
+        const unsigned char lead = static_cast<unsigned char>(line[i]);
+        const std::size_t n = lead < 0x80 ? 1 : (lead >> 5) == 6 ? 2 : (lead >> 4) == 14 ? 3 : (lead >> 3) == 30 ? 4 : 1;
+        std::uint32_t cp = n == 1 ? lead : n == 2 ? lead & 0x1f : n == 3 ? lead & 0x0f : lead & 0x07;
+        for (std::size_t k = 1; k < n && i + k < line.size(); ++k)
+            cp = (cp << 6) | (static_cast<unsigned char>(line[i + k]) & 0x3f);
+        chars.emplace_back(cp, line.substr(i, n));
+        i += n;
+    }
+    std::vector<std::string> units;
+    std::string unit;
+    for (std::size_t i = 0; i < chars.size(); ++i)
+    {
+        unit += chars[i].second;
+        const std::uint32_t cp = chars[i].first;
+        const bool next_ok = i + 1 >= chars.size() || !no_break_before(chars[i + 1].first);
+        if (next_ok && (cp == ' ' || (breaks_anywhere(cp) && !no_break_after(cp))))
+        {
+            units.push_back(unit);
+            unit.clear();
+        }
+    }
+    if (!unit.empty())
+        units.push_back(unit);
+
+    const auto trimmed = [](std::string text) {
+        while (!text.empty() && text.back() == ' ')
+            text.pop_back();
+        return text;
+    };
+    std::vector<std::string> out;
+    std::string current;
+    for (const std::string &next : units)
+    {
+        if (!current.empty() && font.measure(trimmed(current + next), size) > max_width)
+        {
+            out.push_back(trimmed(current));
+            current.clear();
+        }
+        current += next;
+    }
+    if (!current.empty() || out.empty())
+        out.push_back(trimmed(current));
     return out;
 }
 
@@ -78,6 +159,14 @@ void PlayerUi::draw_subtitle(hui::gfx::DrawList &list) const
         start = end + 1;
     }
     const float size = state.sub_size == 0 ? 42.0f : state.sub_size == 2 ? 60.0f : 50.0f;
+    {
+        // Long lines are wrapped to fit the screen.
+        std::vector<std::string> wrapped;
+        for (const std::string &line : lines)
+            for (std::string &part : wrap_line(*env_.fonts.semibold.font, line, size, theme::kScreenW * 0.84f))
+                wrapped.push_back(std::move(part));
+        lines = std::move(wrapped);
+    }
     const float leading = size * 1.16f;
     float baseline = 960.0f - raise - leading * static_cast<float>(lines.size() - 1);
     for (const std::string &line : lines)

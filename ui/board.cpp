@@ -102,6 +102,8 @@ void Board::set_content(const BoardContent *content)
         ++row_;
     down_.position.snap(0.0f);
     shown_ = before_ = Key{};
+    walls_.clear();
+    wall_missing_ = 0.0f;
     ring_.snap(card_rect(row_, 0, true));
     focus_on_.snap(1.0f);
 }
@@ -279,6 +281,32 @@ void Board::update(const hui::InputFrame &input, float dt)
         swap_.start(0.38f);
     }
     swap_.update(dt);
+
+    // The wallpaper layers (see walls_).
+    if (hero_)
+    {
+        const Title *focus = focused_title();
+        const std::uint32_t id = focus ? focus->backdrop : 0;
+        if (id != 0)
+            wall_missing_ = 0.0f;
+        else
+            wall_missing_ += dt;
+        // No picture for this title for a while (it has none, or it cannot be had): the old wallpaper must not stay
+        // up as if it were this title's, so the dark ground fades in instead.
+        const bool want_blank = id == 0 && wall_missing_ > 2.5f && focus && !walls_.empty() && walls_.back().id != 0;
+        if ((id != 0 && (walls_.empty() || walls_.back().id != id)) || want_blank)
+        {
+            walls_.push_back({id, walls_.empty() ? 1.0f : 0.0f});
+            if (walls_.size() > 4)
+                walls_.erase(walls_.begin());
+        }
+        if (!walls_.empty() && walls_.back().alpha < 1.0f)
+        {
+            walls_.back().alpha = std::min(1.0f, walls_.back().alpha + dt / 0.5f);
+            if (walls_.back().alpha >= 1.0f)
+                walls_.erase(walls_.begin(), walls_.end() - 1);
+        }
+    }
 }
 
 void Board::draw_row(hui::gfx::DrawList &list, int row, float top) const
@@ -336,14 +364,6 @@ void Board::draw_hero(hui::gfx::DrawList &list, float offset) const
     if (!now)
         return;
     const float mix = tween::cubic_out(swap_.progress());
-    const Title *prev = nullptr;
-    if (before_.row >= 0 && before_.row < static_cast<int>(content_->rows.size()))
-    {
-        const Row &row = content_->rows[before_.row];
-        if (before_.col >= 0 && before_.col < static_cast<int>(row.items.size()))
-            prev = &row.items[before_.col];
-    }
-
     // The wallpaper: the focused title's backdrop over the whole screen, dimming into a glow as the
     // page scrolls. The page is laid over it with one unbroken fade from the screen's left edge
     // (nothing stops at the line where the content starts, so there is no stripe or cut there)
@@ -353,11 +373,22 @@ void Board::draw_hero(hui::gfx::DrawList &list, float offset) const
     const Color g = theme::ground;
     const float W = theme::kScreenW, H = theme::kScreenH;
     const Rect full{0.0f, 0.0f, W, H};
+    // The pictures are laid over each other whole, and the dimming is one veil over the result. (Dimming each picture by
+    // its own transparency leaves a ghost of the old one that the end of the blend then removes in one frame: the
+    // blend looks choppy in every row but the first, where there is no dimming.)
+    list.push_opacity(intro);
+    for (const WallLayer &layer : walls_)
+    {
+        const float a = tween::cubic_out(layer.alpha);
+        if (layer.id != 0)
+            list.image(layer.id, full, kFullUv, Color::rgb(0xffffff, a));
+        else
+            list.rounded_rect(full, 0, g.with_alpha(a));
+    }
+    if (dim < 1.0f)
+        list.rounded_rect(full, 0, g.with_alpha(1.0f - dim));
+    list.pop_opacity();
     list.push_opacity(dim * intro);
-    if (prev && prev->backdrop != 0 && mix < 1.0f)
-        list.image(prev->backdrop, full, kFullUv, Color::rgb(0xffffff));
-    if (now->backdrop != 0)
-        list.image(now->backdrop, full, kFullUv, Color::rgb(0xffffff, prev ? mix : 1.0f));
     list.gradient_rect(full, 0, g.with_alpha(0.34f), g.with_alpha(0.34f));
     ramp_h(list, 0.0f, 0.0f, theme::kLeft, H, 0.93f, 0.78f, g, 12);
     ramp_h(list, theme::kLeft, 0.0f, 1000.0f, H, 0.78f, 0.0f, g, 36);

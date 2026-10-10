@@ -10,6 +10,7 @@
 #include <condition_variable>
 #include <cstdio>
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -73,11 +74,12 @@ private:
 	// Parallel mode: chunks of the file in a window ahead of the reader.
 	struct Chunk {
 		int64_t index = -1;  // which chunk this slot holds
-		int state = 0;       // 0 empty, 1 downloading, 2 ready
+		int state = 0;       // 0 empty, 1 downloading, 2 ready, 3 failed (a round of three tries; the reader asks again),
+		                     // 4 ready in memory and being written to storage
 		int attempts = 0;
 		double retry_at = 0;
 		int64_t len = 0;
-		std::vector<uint8_t> data;  // when the read-ahead is in memory
+		std::shared_ptr<std::vector<uint8_t>> data;  // while the chunk is in memory (shared with the thread writing it to storage)
 	};
 	void start_parallel();
 	void worker();
@@ -86,7 +88,11 @@ private:
 	void log_speed(int64_t bytes);
 	bool parallel_wanted_ = false, parallel_ = false;
 	int window_ = 32;           // chunks held ahead of the reader
-	FILE* cache_ = nullptr;     // the read-ahead on storage (slot i at i x 4 MB)
+	FILE* cache_ = nullptr;     // the read-ahead on storage (slot i at i x 4 MB): the handle chunks are written with
+	FILE* cache_r_ = nullptr;   // ... and the one the reader reads with, so a slow write never holds up a read
+	std::mutex io_w_, io_r_;    // storage is never touched with m_ held: a slow disk would stall every connection
+	int64_t disk_w_bytes_ = 0;  // for the log: what storage did since the last speed line
+	double disk_w_s_ = 0, disk_w_max_ = 0, disk_r_max_ = 0;
 	std::string cache_path_;
 	double speed_at_ = 0;
 	int64_t speed_bytes_ = 0;
