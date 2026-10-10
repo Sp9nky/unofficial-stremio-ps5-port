@@ -11,7 +11,10 @@
 > **https://discord.gg/fJzFmvFqVf**
 
 > [!IMPORTANT]
-> **Version 1.0 is a full redesign of the app.** Every screen was rebuilt from
+> **Version 1.1 fixes HDR, Real-Debrid and Torbox**, adds a sign-in screen, profiles and
+> in-app updates. See [What's new in 1.1](#whats-new-in-11).
+>
+> **Version 1.0 was a full redesign of the app.** Every screen was rebuilt from
 > scratch. See [What's new in 1.0](#whats-new-in-10).
 >
 > **Stremio now lives in the Games section of the PlayStation home screen.** From
@@ -59,29 +62,34 @@ The titles and artwork in these pictures are invented (made by `tools/preview`).
 
 ## What's new in 1.1
 
-- **Profiles.** One Stremio account per person on the same console: each profile has its
-  own sign-in, library, Continue Watching, addons and settings. With more than one profile,
-  a **Who's watching?** screen opens first (← → to move, ✕ to watch, ▢ to edit). Add, rename,
-  recolour or remove a profile there, or open it any time from **Settings, Change profile**.
-  A new profile signs in with its own QR code. Your current sign-in becomes the first profile.
-- **Updates from inside the app.** Stremio checks GitHub for a newer version when it starts
-  (and in **Settings, Check for updates**), shows what changed, downloads it with a progress
-  bar, checks it against the checksum GitHub publishes, and replaces its own image: you do
-  not have to copy files by hand any more. It needs a payload loader on port 9021 (the one
-  that runs your homebrew) and the image in `/data/homebrew`. The old image is kept next to the
-  new one as `PPSA77711.ffpfsc.old`, and the steps are logged to `/data/stremio-update.log`.
-- **Real HDR.** On an HDR TV, HDR10 and HLG video now goes out as real HDR (not tone mapped
-  to SDR), and the interface is drawn at normal white level on top. The app asks the console for
-  HDR when it starts and tells you the answer on screen; **Settings, HDR output** shows it and
-  turns it off. It needs the TV and the console's HDR setting ("On When Supported") to allow
-  HDR; if you update from an older version, delete the old image, wait a few seconds, then copy
-  the new one so the console reads the app's HDR flags. Dolby Vision profile 8 plays its HDR10
-  picture; profile 5 files (no HDR10 picture inside) are flagged on screen and can show wrong
-  colours.
-- **Smoother dialogs.** Dialogs open and close with one soft motion, the cursor glides between
-  choices, and the update bar moves smoothly.
-- **Shaders changed to avoid a console compiler bug** that could stop the app at start-up
-  in some builds.
+- **Real HDR, fixed.** On an HDR TV, HDR10 and HLG video now goes out as real HDR instead of
+  being squeezed into SDR, and the interface stays at normal white on top. **Settings, HDR
+  output** shows the state and turns it off. It needs the TV and the console's HDR setting
+  ("On When Supported"); if you update from an older version, delete the old image, wait a
+  few seconds, then copy the new one so the console reads the app's HDR flags. Dolby Vision
+  profile 8 plays its HDR10 picture; profile 5 files (no HDR10 picture inside) are flagged
+  on screen and can show wrong colours. The green picture some 10-bit files had is gone too.
+- **Real-Debrid and Torbox, fixed.** Streams from debrid addons (for example Torrentio with
+  your Real-Debrid key) now play straight from the debrid service and show as
+  **[RD+] Torrentio** in the list. For Torbox, connect it in **Settings, Torbox** (you get a
+  code to approve on your phone) and it resolves torrents for you. Without a debrid key
+  nothing changes. Playback no longer stops when a piece of a stream fails, it just tries again.
+- **Sign-in screen.** If nobody is signed in, the app opens on a sign-in screen (QR code, link
+  and code) instead of an empty Home. **Continue without account** skips it.
+- **Profiles.** One Stremio account per person on the same console, each with its own library,
+  Continue Watching, addons and settings. With more than one profile, **Who's watching?**
+  opens first; **Settings, Change profile** opens it any time.
+- **Updates from inside the app.** Stremio checks GitHub when it starts (and in **Settings,
+  Check for updates**), downloads the new version with a progress bar, checks it and replaces
+  its own image. It needs a payload loader on port 9021 and the image in `/data/homebrew`; the
+  old image is kept as `PPSA77711.ffpfsc.old` and the steps go to `/data/stremio-update.log`.
+- **Subtitles.** Arabic no longer shows backwards, and Hebrew, Thai, Japanese, Chinese and
+  Korean subtitles now have fonts.
+- **Pictures load faster and the wallpaper changes smoothly** from title to title.
+  Posters and wallpapers start downloading during the boot animation, and the app waits for
+  the first ones before showing Home.
+- **Smoother dialogs**, refresh-rate matching for video (**Settings, Match refresh rate to
+  video**), and your watched episodes and progress go back to your Stremio account.
 
 ## What's new in 1.0
 
@@ -133,12 +141,12 @@ Fewer buffering stops:
 
 - **Streams directly on the console**: a built-in torrent engine (trackers,
   DHT, peer exchange) downloads just ahead of what you're watching, into a
-  rolling 1 GB cache, and bans peers that send bad data.
+  rolling cache of up to 6 GB, and bans peers that send bad data.
 - **Hardware video decoding**: H.264, HEVC (8 and 10-bit) and VP9 up to 4K
   decode on the PS5's own video hardware; other formats fall back to
   software decoding.
-- **HDR10 tone mapping**: 4K HDR titles are converted to the TV's normal
-  range with correct colours.
+- **Real HDR**: HDR10 and HLG titles go out as HDR on an HDR TV (and are
+  tone mapped to the TV's normal range otherwise).
 - **Faster direct links**: big files are downloaded over several
   connections at once.
 - **Smarter buffering**: the buffer adapts to the video's bitrate and to how
@@ -290,10 +298,11 @@ tools/        preview/ (renders the screens on a PC), make_icons.sh (icons from
   slowly or stop to buffer.
 - Some formats (AV1, 4K HEVC coded in tiles) decode in software and can
   stutter at 4K.
-- HDR is shown tone mapped, not as HDR; Dolby Vision plays its HDR10 layer.
-- Titles and texts in Hebrew, Chinese, Japanese and Korean have no font in the
-  interface yet (they show as "?"), and the interface isn't mirrored for
-  right-to-left languages. Subtitles in Arabic and Hebrew are shown correctly.
+- Dolby Vision plays its HDR10 layer; profile 5 files have no HDR10 layer and can show
+  wrong colours.
+- Hebrew, Thai, Chinese, Japanese and Korean text has fonts, but Indian scripts (Hindi,
+  Tamil...) don't, and the interface isn't mirrored for right-to-left languages.
+  Picture-based subtitles (PGS, VobSub) aren't supported.
 - Some wallpapers are only available in 1280x720 at the image service Stremio
   uses; they are enlarged and sharpened, but cannot look as sharp as full HD ones.
 - A Stremio streaming server is optional: set one in Settings only if you
@@ -338,7 +347,8 @@ developers; thank you to all of them:
   [Montserrat](https://github.com/JulietaUla/Montserrat) (The Montserrat Project
   Authors) and [DejaVu](https://dejavu-fonts.github.io/) for the interface (the
   toolkit also ships Press Start 2P and Patrick Hand); Noto Sans, Noto Emoji and
-  Noto Naskh Arabic UI (Google) for other scripts.
+  Noto Naskh Arabic UI, Noto Sans Hebrew and Thai, and Noto Sans CJK / Source Han Sans
+  (Google, Adobe; subsets for Japanese, Chinese and Korean subtitles) for other scripts.
 - Build tools: [MkPFS](https://github.com/PSBrew/MkPFS) (PSBrew) for packaging,
   Microsoft's [DirectXTex](https://github.com/microsoft/DirectXTex) for the
   console's start-up pictures, [librsvg](https://gitlab.gnome.org/GNOME/librsvg)
