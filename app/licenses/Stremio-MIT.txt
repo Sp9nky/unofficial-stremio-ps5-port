@@ -1,7 +1,9 @@
-Stremio/stremio-icons (UI icons) and Stremio/stremio-video (torrent stream
-set-up behaviour followed by this app) are declared MIT-licensed in their
-package.json files. Authors: Smart Code Ltd. (stremio-icons) and
-Smart Code OOD (stremio-video), https://stremio.com
+Stremio/stremio-icons (UI icons), Stremio/stremio-video (torrent stream
+set-up behaviour followed by this app) and Stremio/stremio-core (the behaviour of
+the account's library, watched episodes and torrent settings, which this app
+follows; no code was copied) are MIT-licensed (package.json, LICENSE.md).
+Authors: Smart Code Ltd. (stremio-icons) and Smart Code OOD (stremio-video,
+stremio-core), https://stremio.com
 
 MIT License
 

@@ -11,8 +11,16 @@ ps5-native-app-boilerplate (BlackBear-     GPL-3.0-or-later                ../LI
   Reloaded), ps5-payload-sdk, PacBrew,
   FFmpeg build, MkPFS, SharpProspero
 ps5-payload-sdk libc (FreeBSD parts)       BSD                             FreeBSD.txt
-Kodi port for PS5 (Team Kodi, VivaLaVent)  GPL-2.0-or-later                GPL-2.0.txt
-Nuvio PS5 (Husam Osman): hardware decoder  GPL-3.0-or-later                ../LICENSE
+Kodi ports for PS5, PS5MC and kodi-ps5     GPL-2.0-or-later                GPL-2.0.txt
+  (Team Kodi, VivaLaVent): HDR switching,
+  refresh-rate matching, video upload
+Nuvio PS5 (Husam Osman): hardware decoder, GPL-3.0-or-later                ../LICENSE
+  downloads, audio and subtitle choice
+Nuvio TV web app, NuvioTVSmart (Nuvio-     GPL-3.0                         ../LICENSE
+  Media): Real-Debrid and Torbox handling
+EVO Player (sainsaji): in-place HDR switch GPL-3.0                         ../LICENSE
+stremio-core (Smart Code OOD): behaviour   MIT                             Stremio-MIT.txt
+  followed, no code copied
 x264                                       GPL-2.0-or-later                GPL-2.0.txt
 FFmpeg                                     GPL-3.0-or-later (this build)   FFmpeg.txt, ../LICENSE
 LLVM libc++, libc++abi, libunwind          Apache-2.0 WITH LLVM-exception  LLVM.txt
@@ -44,6 +52,8 @@ Inter, Montserrat (interface fonts)         SIL OFL 1.1                     ../f
                                                                            ../fonts/Montserrat-LICENSE.txt
 DejaVu Sans Mono (baked interface font)      Bitstream Vera license          ../hui-fonts/DejaVu-LICENSE.txt
 Noto Naskh Arabic UI (Google)              SIL OFL 1.1                     ../fonts/NotoNaskhArabicUI-NOTICE.txt
+Noto Sans Hebrew, Thai; Noto Sans CJK /    SIL OFL 1.1                     ../fonts/NotoSansExtra-NOTICE.txt,
+  Source Han Sans subsets (Google, Adobe)                                    ../fonts/OFL.txt
 
 "Stremio" and the Stremio logo are trademarks of their owner, used only to
 identify the service this unofficial client connects to. This app is not

@@ -18,7 +18,11 @@ affiliated with or endorsed by Stremio.
 | `third_party/json.hpp` | [nlohmann/json](https://github.com/nlohmann/json) 3.11.3 (Niels Lohmann) | MIT |
 | `third_party/stb_image.h` | [stb_image](https://github.com/nothings/stb) 2.30 (Sean Barrett): loads the artwork and icons | MIT / public domain |
 | `src/hwdec_ps5.cpp` (hardware video decoding), `native/stubs/videodec2.c` | ported from [Nuvio PS5](https://github.com/theghostonline/Nuvio-PS5) (`app/engine/media/src/evo_vdec_native.c`, Husam Osman, itself built on an open-source GPL-3.0 PS5 media player); the libSceVideodec2 structures and call sequence come from there and from [ProsperoLight](https://github.com/blackbearreloaded/ProsperoLight) (BlackBearReloaded) and [SharpProspero](https://github.com/SvenGDK/SharpProspero) (SvenGDK) | GPL-3.0-or-later |
-| `src/netstream.cpp` (several connections for big files) | the approach and sizes of Nuvio PS5's `evo_parallel_io.c` | GPL-3.0-or-later |
+| `src/netstream.cpp` (several connections for big files) | the approach and sizes of Nuvio PS5's `evo_parallel_io.c`, its read-ahead in memory and the way it tries a failed piece again | GPL-3.0-or-later |
+| `src/audio_pick.h`, `gl/session_watch.cpp` (automatic subtitles), `gl/hdr_out.cpp` (10-bit SDR conversion on the GPU) | the audio-track ranking (`nuvio_pick_audio_stream`), the subtitle auto-selection (`auto_select_subtitles`) and the `video_yuv_p010_sdr` pipeline of [Nuvio PS5](https://github.com/theghostonline/Nuvio-PS5) (`app/src/nuvio_player.cpp`, Husam Osman); reimplemented here | GPL-3.0-or-later |
+| `src/debrid.cpp`, `src/debrid.h`, `gl/session_debrid.cpp` (Real-Debrid and Torbox) | ported from the debrid code of the Nuvio TV web app, [NuvioTVSmart](https://github.com/NuvioMedia/NuvioTVSmart) (NuvioMedia): `js/core/debrid/*`, `js/data/remote/api/debridApi.js` | GPL-3.0 |
+| `gl/hdr_out.cpp`, `gl/hdr_out.hpp` (HDR output), `gl/vrr.cpp`, `gl/vrr.hpp` (refresh-rate matching), `gl/gpu_upload.cpp` (video planes as rectangle textures) | the approach, the colour maths (HLG to PQ, the interface's sRGB curve, the HDR format words) and the rule for when HDR is switched on, from [PS5MC](https://github.com/VivaLaVent/PS5MC) (Team Kodi, VivaLaVent: `xbmc/windowing/ps5/HdrOutputPS5.cpp`, `xbmc/platform/ps5/VideoOutInfo.cpp`, patches 0007 to 0014 and `gl_gui_composite.frag`); the in-place HDR switch itself comes from [EVO Player](https://github.com/sainsaji/EVO-PLAYER-PS5) (sainsaji, GPL-3.0). Reimplemented for this app's own renderer | GPL-2.0-or-later (PS5MC); GPL-3.0 (EVO Player) |
+| `gl/watched.cpp`, `gl/session_watch.cpp` (library sync), `src/stremio.cpp`, `src/torrent/engine.cpp` | follow the behaviour of [stremio-core](https://github.com/Stremio/stremio-core) (Smart Code OOD): the library item and watched bit field, `send_watched`, `fileMustInclude` and the streaming server's torrent settings. No code was copied | MIT |
 | `gl/session_watch.cpp` (torrent stream set-up) | follows the behaviour of `createTorrent` in [stremio-video](https://github.com/Stremio/stremio-video) (Stremio) | MIT |
 
 ## Linked into the app (downloaded at build time, not included here)
@@ -73,6 +77,7 @@ license:
 | Interface fonts (`app/fonts/Inter-*`, `app/fonts/Montserrat-Medium.ttf`) | Inter (The Inter Project Authors), Montserrat (The Montserrat Project Authors) | SIL Open Font License 1.1 (`app/fonts/Inter-LICENSE.txt`, `app/fonts/Montserrat-LICENSE.txt`) |
 | Baked interface fonts (`third_party/hui/assets/fonts/*.huifont`, distance-field renderings made by the toolkit) | Inter, Montserrat, DejaVu Sans Mono (Bitstream, DejaVu), Press Start 2P, Patrick Hand | SIL Open Font License 1.1; Bitstream Vera license for DejaVu (texts beside the files) |
 | Interface sounds (`app/sounds/glass/`) | the "glass" sound set of ps5-homebrew-ui (originally ProsperoEden, BlackBearReloaded), generated with ElevenLabs Sound Effects v2 for those projects and prepared by the toolkit's tools; played by the toolkit's mixer (`third_party/hui/src/audio`) | GPL-3.0-or-later, as stated in `third_party/hui/THIRD_PARTY_NOTICES.md` |
+| Hebrew and Thai fonts (`app/fonts/NotoSansHebrew-*`, `app/fonts/NotoSansThai-*`), CJK fonts (`app/fonts/NotoSans{JP,SC,TC,KR}-Subset.ttf`) | Noto Sans Hebrew and Noto Sans Thai (Google); the CJK ones are Noto Sans CJK / Source Han Sans (Google, Adobe). Subsets made for subtitles: fixed at one weight and cut down to the characters of the common legacy character sets | SIL Open Font License 1.1 (`app/fonts/NotoSansExtra-NOTICE.txt`, `app/fonts/OFL.txt`) |
 | Arabic font (`app/fonts/NotoNaskhArabicUI-*`) | Noto Naskh Arabic UI (Google), as shipped by [Nuvio PS5](https://github.com/theghostonline/Nuvio-PS5) | SIL Open Font License 1.1 (`app/fonts/NotoNaskhArabicUI-NOTICE.txt`) |
 | `app/ca-bundle.crt` | Mozilla's CA certificate list, as distributed by curl | MPL-2.0 |
 | Home-screen pictures (`app/sce_sys/pic0*`, `pic1*`) | this project's own artwork: the interface's violet light (rendered by `tools/preview`) with the Stremio logo | the design is ours; the Stremio logo is Stremio's trademark |
@@ -85,6 +90,11 @@ index (`app/licenses/README.txt`). The build copies that folder,
 of the OpenGL SDK, so they ship inside the `.ffpfsc`.
 
 ## Services and runtime
+
+Real-Debrid (`api.real-debrid.com`) and Torbox (`api.torbox.app`) are services of their
+own companies; the app only calls their public interfaces with the user's own key or
+account. [Torrentio](https://github.com/TheBeastLT/torrentio-scraper) and every other
+addon are the user's, and are not part of this app.
 
 The app talks to Stremio's public services (`api.strem.io` for the account,
 library and addon collection, `link.stremio.com` for sign-in) and to the addons

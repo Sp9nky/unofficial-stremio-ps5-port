@@ -339,10 +339,20 @@ developers; thank you to all of them:
 - The [ps5-payload-sdk](https://github.com/ps5-payload-dev/sdk) and its
   [PacBrew](https://github.com/ps5-payload-dev/pacbrew-repo) libraries
   (FFmpeg, libcurl, OpenSSL, libwebp, GNU FriBidi, miniupnpc and more).
-- The [Kodi port for PS5](https://github.com/VivaLaVent/kodi-ps5) (Team Kodi,
-  VivaLaVent): techniques for the heap, thread stacks and the keyboard dialog.
+- The Kodi ports for PS5, [PS5MC](https://github.com/VivaLaVent/PS5MC) and
+  [kodi-ps5](https://github.com/VivaLaVent/kodi-ps5) (Team Kodi, VivaLaVent):
+  techniques for the heap, thread stacks and the keyboard dialog, and, in 1.1, how HDR
+  is switched on (only for HDR10 and HLG video, and only when the display link reports
+  HDR), the HLG-to-PQ and interface-compositing maths, refresh-rate matching on VRR
+  links, and sending video to the GPU as rectangle textures.
 - [Nuvio PS5](https://github.com/theghostonline/Nuvio-PS5) (Husam Osman): the
-  hardware video decoding and parallel downloads were ported from it.
+  hardware video decoding and parallel downloads were ported from it; in 1.1 also the
+  choice of the audio track, the automatic subtitles, the 10-bit SDR video path, the
+  read-ahead in memory and how a failed download piece is tried again. Its Nuvio TV web
+  app, [NuvioTVSmart](https://github.com/NuvioMedia/NuvioTVSmart) (NuvioMedia), is where
+  the Real-Debrid and Torbox handling was ported from.
+- [EVO Player](https://github.com/sainsaji/EVO-PLAYER-PS5) (sainsaji): the in-place HDR
+  switch of the console's screen, which Nuvio PS5 and PS5MC build on.
 - [dht](https://github.com/jech/dht) (Juliusz Chroboczek) and
   [miniupnpc](https://github.com/miniupnp/miniupnp) (Thomas Bernard): the
   torrent engine's peer discovery and port mapping.
@@ -370,7 +380,14 @@ developers; thank you to all of them:
 - [Stremio](https://github.com/Stremio): [stremio-icons](https://github.com/Stremio/stremio-icons)
   and [stremio-video](https://github.com/Stremio/stremio-video), and the logo
   from [dashboard-icons](https://github.com/homarr-labs/dashboard-icons)
-  (homarr-labs). The app uses Stremio's public services for your account.
+  (homarr-labs). [stremio-core](https://github.com/Stremio/stremio-core) is the
+  reference for how the account's library, Continue Watching, watched episodes and the
+  torrent settings behave (no code was taken from it). The app uses Stremio's public
+  services for your account.
+- [Real-Debrid](https://real-debrid.com/) and [Torbox](https://torbox.app/) are services
+  of their own companies: the app only uses their public interfaces, with your own key or
+  account. [Torrentio](https://github.com/TheBeastLT/torrentio-scraper) and the other
+  addons you install are yours and are not part of this app.
 - Posters, wallpapers and descriptions come from the addons you use (for example
   Cinemeta and its image service) and belong to their owners.
 
