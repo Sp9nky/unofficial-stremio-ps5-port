@@ -62,13 +62,18 @@ The titles and artwork in these pictures are invented (made by `tools/preview`).
 
 ## What's new in 1.1
 
-- **Real HDR, fixed.** On an HDR TV, HDR10 and HLG video now goes out as real HDR instead of
-  being squeezed into SDR, and the interface stays at normal white on top. **Settings, HDR
-  output** shows the state and turns it off. It needs the TV and the console's HDR setting
-  ("On When Supported"); if you update from an older version, delete the old image, wait a
-  few seconds, then copy the new one so the console reads the app's HDR flags. Dolby Vision
-  profile 8 plays its HDR10 picture; profile 5 files (no HDR10 picture inside) are flagged
-  on screen and can show wrong colours. The green picture some 10-bit files had is gone too.
+- **Real HDR, fixed, and automatic.** While an HDR10 or HLG video plays on a screen that
+  reports HDR, it goes out as real HDR instead of being squeezed into SDR, and the interface
+  stays at normal white on top. When the video ends, the screen goes back to normal. On a
+  screen that doesn't report HDR (an SDR monitor, for example) nothing changes: its colours stay
+  as they are, and HDR video is converted to normal colours. There is no HDR setting to turn
+  on or off. It needs an HDR screen and the PS5's own HDR setting at **On When Supported**
+  (Settings, Screen and Video, Video Output). The screen may blink for a moment when an HDR
+  video starts and when it ends. If you update from an older version, delete the old image,
+  wait a few seconds, then copy the new one so the console reads the app's HDR flags. Dolby
+  Vision profile 8 plays its HDR10 picture; profile 5 files (no HDR10 picture inside) are
+  flagged on screen and can show wrong colours. The green picture some 10-bit files had is
+  gone too.
 - **Real-Debrid and Torbox, fixed.** Streams from debrid addons (for example Torrentio with
   your Real-Debrid key) now play straight from the debrid service and show as
   **[RD+] Torrentio** in the list. For Torbox, connect it in **Settings, Torbox** (you get a
@@ -83,8 +88,12 @@ The titles and artwork in these pictures are invented (made by `tools/preview`).
   Check for updates**), downloads the new version with a progress bar, checks it and replaces
   its own image. It needs a payload loader on port 9021 and the image in `/data/homebrew`; the
   old image is kept as `PPSA77711.ffpfsc.old` and the steps go to `/data/stremio-update.log`.
-- **Subtitles.** Arabic no longer shows backwards, and Hebrew, Thai, Japanese, Chinese and
-  Korean subtitles now have fonts.
+- **Audio and subtitles.** Videos start with the English audio track (the best English one,
+  never a commentary); change the order in **Settings, Audio languages**, or type `-` to use
+  the file's own default. Subtitles in your language turn on by themselves (**Settings,
+  Subtitle languages**; **Subtitles on automatically** switches it off), and the message that
+  names them now shows at the top of the loading screen. Arabic no longer shows backwards, and
+  Hebrew, Thai, Japanese, Chinese and Korean subtitles now have fonts.
 - **Pictures load faster and the wallpaper changes smoothly** from title to title.
   Posters and wallpapers start downloading during the boot animation, and the app waits for
   the first ones before showing Home.
@@ -145,8 +154,8 @@ Fewer buffering stops:
 - **Hardware video decoding**: H.264, HEVC (8 and 10-bit) and VP9 up to 4K
   decode on the PS5's own video hardware; other formats fall back to
   software decoding.
-- **Real HDR**: HDR10 and HLG titles go out as HDR on an HDR TV (and are
-  tone mapped to the TV's normal range otherwise).
+- **Real HDR**: HDR10 and HLG titles go out as HDR on a screen that reports HDR
+  (and are converted to normal colours on any other screen).
 - **Faster direct links**: big files are downloaded over several
   connections at once.
 - **Smarter buffering**: the buffer adapts to the video's bitrate and to how
