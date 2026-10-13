@@ -142,14 +142,14 @@ class Session
     bool video_high = false, video_hlg = false;
     int video_disp_w = 0, video_disp_h = 0; // the size the HDR picture is shown at
     hui::gfx::Rect hdr_rect;
-    // Whether HDR output should be on now (an HDR10 or HLG video is playing and the setting allows it), and the
+    // Whether HDR output should be wanted now (an HDR10 or HLG video is playing; hdr::update also needs the link to run in HDR), and the
     // main loop telling back whether the screen really is in HDR.
     bool hdr_wanted() const;
     void set_hdr_scanout(bool on);
     // Refresh-rate matching (gl/vrr.cpp): the setting, and the frame rate of the video playing now (0: none).
     bool vrr_enabled() const;
     double video_fps() const;
-    void hdr_status_changed(const std::string &text); // the HDR output's state changed: Settings shows it (no pop-up)
+    void hdr_status_changed(const std::string &text); // the HDR output's state changed (log only, no pop-up)
     bool typing() const
     {
         return ime_.active();

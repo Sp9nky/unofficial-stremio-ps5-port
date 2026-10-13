@@ -35,7 +35,6 @@ enum SettingIndex
     kAudioLangs,
     kAutoplay,
     kUiSounds,
-    kHdr,
     kVrr,
     kAddAddon,
     kUpdates,
@@ -152,10 +151,12 @@ void Session::load_prefs()
         prefs_.subtitle_langs = jstr(j, "subtitle_languages", prefs_.subtitle_langs);
         prefs_.auto_subtitles = jbool(j, "auto_subtitles", prefs_.auto_subtitles);
         prefs_.sub_size = jstr(j, "subtitle_size", prefs_.sub_size);
-        prefs_.audio_langs = jstr(j, "audio_languages");
+        // Empty (what older versions saved for "Default") now means English, like the subtitles.
+        prefs_.audio_langs = jstr(j, "audio_languages", prefs_.audio_langs);
+        if (prefs_.audio_langs.empty())
+            prefs_.audio_langs = "eng";
         prefs_.autoplay_next = jbool(j, "autoplay_next", prefs_.autoplay_next);
         prefs_.ui_sounds = jbool(j, "ui_sounds", prefs_.ui_sounds);
-        prefs_.hdr_output = jbool(j, "hdr_output", prefs_.hdr_output);
         prefs_.match_refresh = jbool(j, "match_refresh", prefs_.match_refresh);
         prefs_.auth_key = jstr(j, "auth_key");
         prefs_.user_email = jstr(j, "user_email");
@@ -179,7 +180,6 @@ json Session::prefs_json(const Prefs &p)
     j["audio_languages"] = p.audio_langs;
     j["autoplay_next"] = p.autoplay_next;
     j["ui_sounds"] = p.ui_sounds;
-    j["hdr_output"] = p.hdr_output;
     j["match_refresh"] = p.match_refresh;
     j["extra_addons"] = p.extra_addons;
     j["auth_key"] = p.auth_key;
@@ -466,14 +466,11 @@ void Session::refresh_settings()
     set(kAutoSubs, Kind::toggle, "Subtitles on automatically", "", "Turn subtitles on automatically in your preferred language.",
         prefs_.auto_subtitles);
     set(kSubSize, Kind::value, "Subtitle size", size_label(prefs_.sub_size), "How large subtitles are drawn over the video.");
-    set(kAudioLangs, Kind::value, "Audio languages", prefs_.audio_langs.empty() ? "Default" : prefs_.audio_langs,
-        "Preferred audio track language, for example \"eng\". Leave empty for the default.");
+    set(kAudioLangs, Kind::value, "Audio languages", prefs_.audio_langs == "-" ? "File default" : prefs_.audio_langs,
+        "Preferred audio track language, in order, for example \"eng\" or \"gre, eng\". Type - to use the file's own default track.");
     set(kAutoplay, Kind::toggle, "Play next episode automatically", "", "Start the next episode when one ends.",
         prefs_.autoplay_next);
     set(kUiSounds, Kind::toggle, "Interface sounds", "", "A soft sound when you move around, go back or switch page.", prefs_.ui_sounds);
-    set(kHdr, Kind::value, "HDR output", prefs_.hdr_output ? std::string(hdr::status()) : std::string("Off"),
-        "Send the picture to the TV as HDR (video as HDR10 or HLG, the interface at normal white). Tried when the app "
-        "starts; the line says what the console answered. Press Cross to turn it on or off.");
     set(kVrr, Kind::toggle, "Match refresh rate to video", "",
         "With VRR on in the console's video settings and a TV that supports it, the TV refreshes at a multiple of the "
         "video's frame rate (a 24 fps film at 48 Hz, each frame shown twice) instead of a fixed 60 Hz, so motion is even.",
@@ -546,7 +543,7 @@ void Session::settings_activate(int row)
         ask_text([this](const std::string &v) {
             if (trim(v).empty())
                 return;
-            prefs_.audio_langs = trim(v) == "-" ? "" : trim(v);
+            prefs_.audio_langs = trim(v);
             save_prefs();
             cue(hui::audio::Cue::saved);
             refresh_settings();
@@ -610,11 +607,6 @@ void Session::settings_activate(int row)
         break;
     case kUpdates:
         update_check(true);
-        break;
-    case kHdr:
-        prefs_.hdr_output = !prefs_.hdr_output;
-        save_prefs();
-        cue(hui::audio::Cue::toggle);
         break;
     case kVrr:
         prefs_.match_refresh = !prefs_.match_refresh;

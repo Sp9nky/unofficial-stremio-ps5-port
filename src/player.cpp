@@ -18,6 +18,7 @@ extern "C" {
 #include <cstring>
 #include <thread>
 
+#include "audio_pick.h"
 #include "http.h"
 #include "netstream.h"
 #include "stremio.h"
@@ -339,18 +340,8 @@ void Player::demux_run() {
 	if (fmt_->duration != AV_NOPTS_VALUE && fmt_->duration > 0) duration_ = double(fmt_->duration) / AV_TIME_BASE;
 
 	int vs = av_find_best_stream(fmt_, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
-	int as = -1;
-	// Preferred audio language first, else FFmpeg's pick.
-	for (auto& want : opts_.audio_langs) {
-		for (unsigned i = 0; i < fmt_->nb_streams && as < 0; i++) {
-			AVStream* st = fmt_->streams[i];
-			if (st->codecpar->codec_type != AVMEDIA_TYPE_AUDIO) continue;
-			AVDictionaryEntry* e = av_dict_get(st->metadata, "language", nullptr, 0);
-			if (e && language_to_iso639_2(e->value) == want) as = int(i);
-		}
-		if (as >= 0) break;
-	}
-	if (as < 0) as = av_find_best_stream(fmt_, AVMEDIA_TYPE_AUDIO, -1, vs, nullptr, 0);
+	// The preferred language first (English unless Settings say otherwise), the best track within it, else FFmpeg's pick.
+	int as = pick_audio_stream(fmt_, opts_.audio_langs, av_find_best_stream(fmt_, AVMEDIA_TYPE_AUDIO, -1, vs, nullptr, 0));
 	if (vs < 0 && as < 0) {
 		avformat_close_input(&fmt_);
 		fail("No video or audio in this stream");

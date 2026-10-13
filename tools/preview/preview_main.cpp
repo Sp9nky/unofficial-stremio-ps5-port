@@ -740,6 +740,20 @@ int main(int argc, char **argv)
             sx::draw_launch(list, env, state, 1.2f, 1.0f);
             rig.shot("launch-2-connecting", backdrop_spec, list);
         }
+        // The subtitles message over the loading screen: at the top, clear of the steps and Cancel.
+        state.stage = 2;
+        state.progress = 0.0f;
+        state.done = "0%";
+        state.peers = "0";
+        state.speed = "0.0 MB/s";
+        {
+            hui::gfx::DrawList list;
+            sx::draw_launch(list, env, state, 1.2f, 1.0f);
+            sx::ToastState toast;
+            toast.message = "Subtitles: English \xC2\xB7 English [CC] \xC2\xB7 SRT (in file)";
+            sx::draw_toast(list, env, toast, 1.0f, true);
+            rig.shot("launch-3-subtitles-message", backdrop_spec, list);
+        }
     }    if (wants("scripts"))
     {
         hui::gfx::DrawList list;

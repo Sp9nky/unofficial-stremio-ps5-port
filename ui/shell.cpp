@@ -823,7 +823,7 @@ void Shell::draw(hui::gfx::DrawList &list, hui::gfx::BackdropSpec &backdrop) con
     if (sign_in_t_.value > 0.01f)
         draw_sign_in(list, env_, s_.sign_in, clock_, sign_in_t_.value);
     if (toast_t_.value > 0.01f)
-        draw_toast(list, env_, s_.toast, toast_t_.value);
+        draw_toast(list, env_, s_.toast, toast_t_.value, s_.watching && s_.launch_open);
     if (boot_out_ < kBootOut)
         draw_boot(list, env_, boot_t_, boot_out_ < 0.0f ? 0.0f : boot_out_ / kBootOut);
 }

@@ -874,12 +874,13 @@ double Session::video_fps() const
 
 bool Session::hdr_wanted() const
 {
-    return prefs_.hdr_output; // HDR is tried at start and kept while it is on: the whole app goes through the HDR pass
+    // Start in SDR; HDR only while an HDR10 or HLG video plays (hdr::update also needs the link to run in HDR)
+    return watching && !launch_open && player_.hdr_capable();
 }
 
 void Session::hdr_status_changed(const std::string &)
 {
-    refresh_settings(); // the line in Settings shows it; no pop-up
+    // The state is in the log ("[HDR] status: ..."); there is no Settings row and no pop-up for it.
 }
 
 void Session::set_hdr_scanout(bool on)
@@ -1471,25 +1472,19 @@ void Session::watch_auto_subtitles()
         return;
     for (const auto &lang : pref_langs(prefs_.subtitle_langs))
     {
-        // Do not pick subtitles in the language being heard.
-        bool heard = false;
-        for (const auto &t : player_.audio_tracks())
-            if (t.stream == player_.audio_stream() && t.lang == lang)
-                heard = true;
-        if (heard)
-        {
-            w_auto_sub_done_ = true;
-            return;
-        }
+        // As Nuvio does (auto_select_subtitles): the first preferred language that has a track, whatever the audio's
+        // language is.
         for (std::size_t i = 0; i < w_subs_.size(); ++i)
         {
             if (w_subs_[i].lang != lang)
                 continue;
             w_auto_sub_done_ = true;
+            dlog("subtitles: turned on %s", lang.c_str());
             watch_select_sub(static_cast<int>(i));
             return;
         }
     }
+    dlog("subtitles: %zu tracks listed, none in the preferred languages yet (%s)", w_subs_.size(), prefs_.subtitle_langs.c_str());
 }
 
 // ---------------------------------------------------------------------------

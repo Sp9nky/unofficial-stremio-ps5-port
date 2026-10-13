@@ -69,6 +69,7 @@ struct ToastState
     std::string message;
     bool error = false;
 };
-void draw_toast(hui::gfx::DrawList &list, const Env &env, const ToastState &state, float t);
+// `top`: at the top of the screen (over the loading screen, whose bottom holds the steps and Cancel) instead of the bottom.
+void draw_toast(hui::gfx::DrawList &list, const Env &env, const ToastState &state, float t, bool top = false);
 
 } // namespace sx

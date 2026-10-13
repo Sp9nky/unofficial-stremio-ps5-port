@@ -39,6 +39,8 @@ struct State
     int failures = 0;
     std::int64_t switched_at_us = 0;
     bool confirmed = false;
+    bool want_prev = false;  // update(): a video wanting HDR was already playing last call
+    bool link_sdr = false;  // the link reported SDR when that video started: stay in SDR until it ends
     std::string status = "Starting";
     std::string no_handle_text = "Not available: no video output found";
     unsigned status_version = 0;
@@ -68,6 +70,21 @@ bool read_status(std::int32_t handle, OutputStatus *out)
         return false;
     *out = *reinterpret_cast<const OutputStatus *>(raw);
     return true;
+}
+
+// PS5MC's IsDisplayHdr: the link runs in HDR (dynamic range 2 or flag bit 0). Logs what the display reports.
+bool link_is_hdr(const char *when)
+{
+    OutputStatus st{};
+    if (!read_status(g.handle, &st))
+    {
+        hui::sys::log("[HDR] display (%s): status unreadable", when);
+        return false;
+    }
+    hui::sys::log("[HDR] display (%s): dynamic range %u (%s), flags %#llx", when, st.dynamic_range,
+                  st.dynamic_range == 2 ? "HDR" : st.dynamic_range == 1 ? "SDR" : "unknown",
+                  static_cast<unsigned long long>(st.flags));
+    return st.dynamic_range == 2 || (st.flags & 1);
 }
 #endif
 
@@ -311,11 +328,7 @@ void init(int surface_width, int surface_height)
         const int rc = sceVideoOutGetOutputStatus(from_log, raw);
         hui::sys::log("[HDR] video out handle %d, from the driver's log (output status rc %#x)", from_log, static_cast<unsigned>(rc));
         g.handle = from_log;
-        OutputStatus st{};
-        if (read_status(from_log, &st))
-            hui::sys::log("[HDR] display: dynamic range %u (%s), flags %#llx", st.dynamic_range,
-                          st.dynamic_range == 2 ? "HDR" : st.dynamic_range == 1 ? "SDR" : "unknown",
-                          static_cast<unsigned long long>(st.flags));
+        link_is_hdr("app start");
         return;
     }
     // Not in the log: ask each number until one answers.
@@ -326,6 +339,7 @@ void init(int surface_width, int surface_height)
         {
             g.handle = h;
             hui::sys::log("[HDR] video out handle %d, found by asking", h);
+            link_is_hdr("app start");
             return;
         }
     }
@@ -360,6 +374,19 @@ bool update(bool want)
         want = false;
     }
     const std::int64_t now = hui::sys::monotonic_us();
+    // PS5MC's rule: HDR only for an HDR10/HLG video AND a link that runs in HDR. Asked once, when the video starts.
+#ifdef PLATFORM_PS5_NATIVE
+    if (want && !g.want_prev)
+        g.link_sdr = !link_is_hdr("video start");
+#endif
+    if (!want)
+        g.link_sdr = false;
+    g.want_prev = want;
+    if (want && g.link_sdr)
+    {
+        want = false; // SDR link: the video is tone mapped as before
+        set_status("Off: the display link is SDR");
+    }
     if (want && !g.hdr && g.failures < 2)
     {
         int rc = 0;
@@ -387,8 +414,10 @@ bool update(bool want)
             set_status("Off");
         }
     }
-    else if (!want && !g.hdr && g.failures == 0 && !g.gl_failed)
+    else if (!want && !g.hdr && g.failures == 0 && !g.gl_failed && !g.link_sdr)
     {
+        // (not while an HDR video plays on an SDR link: "Off: the display link is SDR" stays, and the status does not change
+        // every frame)
         set_status("Off");
     }
     // A moment after the switch: what does the display say?

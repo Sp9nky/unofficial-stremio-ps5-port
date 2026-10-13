@@ -587,11 +587,12 @@ void draw_sign_in_screen(hui::gfx::DrawList &list, const Env &env, const SignInS
 
 // ---------------------------------------------------------------------------
 
-void draw_toast(hui::gfx::DrawList &list, const Env &env, const ToastState &s, float t)
+void draw_toast(hui::gfx::DrawList &list, const Env &env, const ToastState &s, float t, bool top)
 {
     const float text_w = env.fonts.semibold.measure(s.message, 27.0f);
     const float w = std::min(1500.0f, 150.0f + text_w);
-    const Rect r{theme::kScreenW * 0.5f - w * 0.5f, 936.0f + 22.0f * (1.0f - t), w, 84.0f};
+    // It arrives from the edge it sits at.
+    const Rect r{theme::kScreenW * 0.5f - w * 0.5f, top ? 64.0f - 22.0f * (1.0f - t) : 936.0f + 22.0f * (1.0f - t), w, 84.0f};
     const Color edge = s.error ? Color::rgb(0xe5566a) : theme::accent;
     list.push_opacity(t);
     list.shadow({r.x + 6, r.y + 18, r.w - 12, r.h - 8}, 42.0f, 36.0f, Color::rgb(0x000000, 0.5f));

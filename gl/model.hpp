@@ -48,11 +48,10 @@ struct Prefs
     std::string subtitle_langs = "eng";
     bool auto_subtitles = true;
     std::string sub_size = "sub-m";
-    std::string audio_langs;
+    std::string audio_langs = "eng"; // preferred audio track; "-": none (the file's own default track)
     bool autoplay_next = true;
     bool ui_sounds = true; // the interface's soft sounds
     bool match_refresh = true; // on a VRR link, present at a multiple of the video's frame rate (gl/vrr.cpp)
-    bool hdr_output = true; // HDR10 and HLG video go out as HDR when the display link runs in HDR
     std::vector<std::string> extra_addons;
     std::string auth_key, user_email;
     std::string torbox_key; // Torbox resolves torrents and its own streams when set (src/debrid.cpp)
