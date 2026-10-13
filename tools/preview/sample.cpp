@@ -226,6 +226,7 @@ bool load_detail(hui::gfx::Renderer &renderer, const std::string &art_dir, Detai
         Stream s;
         s.resolution = res;
         s.name = name;
+        s.addon = name;
         s.detail = detail;
         s.tags = tags;
         s.size = size;
@@ -249,6 +250,7 @@ bool load_detail(hui::gfx::Renderer &renderer, const std::string &art_dir, Detai
         stream("720p", "Debrid Streams", "Northbound.2024.720p.WEB.h264", "", "1.8 GB", ""),
         stream("SD", "Stream Finder", "Northbound.2024.480p.WEBRip.x264.mp4", "", "0.9 GB", "177 seeds"),
     };
+    movie->stream_addons = {"Stream Finder", "Debrid Streams", "This Console"};
 
     *series = DetailContent{};
     series->title = titles[1];
@@ -276,6 +278,7 @@ bool load_detail(hui::gfx::Renderer &renderer, const std::string &art_dir, Detai
     }
     series->stream_heading = "S2 E5  \xC2\xB7  The Long Night";
     series->streams = movie->streams;
+    series->stream_addons = movie->stream_addons;
     for (Stream &s : series->streams)
     {
         auto swap = [&](const char *from, const char *to) {

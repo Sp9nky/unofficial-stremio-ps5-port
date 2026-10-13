@@ -148,6 +148,10 @@ void Shell::route_detail(const hui::InputFrame &input, float dt)
             s_.detail_play(detail_.stream_index(), false);
         else if (input.is_pressed(Action::west))
             s_.detail_play(detail_.stream_index(), true);
+        else if (input.is_pressed(Action::page_prev) && detail_.cycle_source(-1))
+            sound_.play(hui::audio::Cue::tab);
+        else if (input.is_pressed(Action::page_next) && detail_.cycle_source(1))
+            sound_.play(hui::audio::Cue::tab);
     }
     else
     {

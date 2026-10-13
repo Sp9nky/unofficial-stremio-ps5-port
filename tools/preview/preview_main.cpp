@@ -375,6 +375,9 @@ int main(int argc, char **argv)
             tap(page, hui::Action::confirm, 70);
             press(page, Direction::down, 40);
             shoot(page, "detail-4-series-streams");
+            page.cycle_source(1);
+            settle(page, 40);
+            shoot(page, "detail-5-series-streams-one-addon");
         }
     }
     if (wants("search"))

@@ -115,6 +115,7 @@ struct Stream
 {
     std::string resolution; // "4K", "1080p", "720p", "SD"
     std::string name;       // the addon or release: "Stream Finder"
+    std::string addon;      // the addon it came from, for the addon tabs
     std::string detail;     // the file name
     std::string tags;       // "HDR10  ·  Dolby Atmos"
     std::string size;       // "18.4 GB"
@@ -131,6 +132,8 @@ struct DetailContent
     int season = 0;
     std::vector<Episode> episodes;
     std::vector<Stream> streams;
+    // The addons that sent streams, in the user's order: the tabs after "All". Empty when fewer than two.
+    std::vector<std::string> stream_addons;
     std::string stream_heading; // "Streams", or the episode they are for
     // What the lists say while they are empty: "Loading streams...", "No streams found".
     std::string episodes_status;

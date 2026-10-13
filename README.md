@@ -179,6 +179,7 @@ your sign-in should carry over; if it doesn't, sign in again.
 | | △ | mark the episode watched / not watched |
 | Title page, streams | ✕ | play |
 | | □ | play with the streaming server |
+| | L1 / R1 | previous / next addon (All, then each addon) |
 | Player | ✕ or touchpad | pause / play |
 | | D-pad left / right | seek 10 s |
 | | L1 / R1 | seek 1 min |

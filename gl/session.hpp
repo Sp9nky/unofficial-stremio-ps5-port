@@ -364,6 +364,7 @@ class Session
     std::string d_stream_heading_;
     std::vector<::Stream> d_streams_; // in the order the screen shows them
     std::vector<::Stream> d_found_;   // as the addons sent them
+    std::vector<std::string> d_sources_; // the addons asked for streams, in the user's order
     int d_gen_ = 0, d_pending_ = 0, d_answered_ = 0, d_meta_gen_ = 0;
     bool d_open_ = false;
 

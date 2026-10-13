@@ -147,6 +147,7 @@ Stream view_of(const ::Stream &st)
     Stream v;
     v.resolution = resolution_of(st);
     v.name = st.addon.empty() ? first_line(st.name) : st.addon;
+    v.addon = v.name;
     // The release name: the file's own, else the first line of the description.
     v.detail = !st.filename.empty() ? st.filename : first_line(st.description);
     if (v.detail.empty())
@@ -535,8 +536,10 @@ void Session::detail_load_streams(const std::string &video_id, const std::string
     d_video_id_ = video_id;
     d_stream_heading_ = heading;
     d_found_.clear();
+    d_sources_.clear();
     d_streams_.clear();
     detail.streams.clear();
+    detail.stream_addons.clear();
     detail.stream_heading = heading;
     d_answered_ = 0;
 
@@ -547,6 +550,8 @@ void Session::detail_load_streams(const std::string &video_id, const std::string
     for (const auto &a : addons_)
         if (a->supports("stream", type, video_id))
             sources.push_back({a->name, a->resource_url("stream", type, video_id)});
+    for (const auto &s : sources)
+        d_sources_.push_back(s.first);
     d_pending_ = static_cast<int>(sources.size());
     if (sources.empty())
     {
@@ -606,6 +611,21 @@ void Session::detail_refresh_streams()
         d_streams_.push_back(d_found_[i]);
         detail.streams.push_back(view_of(d_found_[i]));
     }
+    // The addon tabs: those that sent something, in the user's order, then any the streams name otherwise.
+    detail.stream_addons.clear();
+    const auto has_tab = [&](const std::string &name) {
+        return std::find(detail.stream_addons.begin(), detail.stream_addons.end(), name) != detail.stream_addons.end();
+    };
+    for (const std::string &name : d_sources_)
+        for (const Stream &v : detail.streams)
+            if (v.addon == name && !has_tab(name))
+                detail.stream_addons.push_back(name);
+    for (const Stream &v : detail.streams)
+        if (!v.addon.empty() && !has_tab(v.addon))
+            detail.stream_addons.push_back(v.addon);
+    // One addon is the same as All: no tabs to turn.
+    if (detail.stream_addons.size() < 2)
+        detail.stream_addons.clear();
     // The next episode: a stream like the last one once the streams are in
     // (same binge group, else the same addon, else the first).
     if (autoplay_pending_)

@@ -25,6 +25,11 @@ constexpr float kEpisodePitch = 128.0f;
 constexpr float kStreamH = 124.0f;
 constexpr float kStreamPitch = 136.0f;
 constexpr float kListViewH = 770.0f;
+// The addon bar over the streams sits where the season bar is over the episodes.
+constexpr float kTabsTop = 112.0f;
+constexpr float kTabsH = 76.0f;
+constexpr float kStreamTop = kListTop;
+constexpr float kStreamViewH = kListViewH;
 
 Color resolution_colour(const std::string &r)
 {
@@ -49,8 +54,42 @@ Rect Detail::episode_rect(int index, bool final_position) const
 Rect Detail::stream_rect(int index, bool final_position) const
 {
     const float scroll = final_position ? stream_scroll_.position.target : stream_scroll_.offset();
-    return {kPanel.x + 28.0f, kListTop + static_cast<float>(index) * kStreamPitch - scroll, kPanel.w - 56.0f,
+    return {kPanel.x + 28.0f, kStreamTop + static_cast<float>(index) * kStreamPitch - scroll, kPanel.w - 56.0f,
             kStreamH};
+}
+
+void Detail::filter_streams()
+{
+    visible_.clear();
+    if (!content_)
+        return;
+    // The tab's addon sent nothing this time (another episode, still loading): back to All.
+    const std::vector<std::string> &tabs = content_->stream_addons;
+    if (!source_.empty() && std::find(tabs.begin(), tabs.end(), source_) == tabs.end())
+        source_.clear();
+    for (int i = 0; i < static_cast<int>(content_->streams.size()); ++i)
+        if (source_.empty() || content_->streams[static_cast<std::size_t>(i)].addon == source_)
+            visible_.push_back(i);
+}
+
+bool Detail::cycle_source(int step)
+{
+    if (!content_ || content_->stream_addons.empty())
+        return false;
+    const std::vector<std::string> &tabs = content_->stream_addons;
+    const int n = static_cast<int>(tabs.size()) + 1; // "All" first
+    int at = 0;
+    for (int i = 0; i < static_cast<int>(tabs.size()); ++i)
+        if (tabs[static_cast<std::size_t>(i)] == source_)
+            at = i + 1;
+    const int next = ((at + step) % n + n) % n;
+    source_ = next == 0 ? std::string() : tabs[static_cast<std::size_t>(next - 1)];
+    filter_streams();
+    stream_ = 0;
+    stream_scroll_.position.snap(0.0f);
+    ring_.snap(stream_rect(0, true));
+    list_swap_.start(0.25f);
+    return true;
 }
 
 void Detail::set_content(const DetailContent *content)
@@ -58,6 +97,8 @@ void Detail::set_content(const DetailContent *content)
     content_ = content;
     episode_ = 0;
     stream_ = 0;
+    source_.clear();
+    filter_streams();
     streams_wanted_ = false;
     hint_serial_ = content ? content->hint_serial : 0;
     streams_serial_ = content ? content->streams_serial : 0;
@@ -83,7 +124,8 @@ void Detail::refresh()
     if (!content_)
         return;
     const int episodes = static_cast<int>(content_->episodes.size());
-    const int streams = static_cast<int>(content_->streams.size());
+    filter_streams();
+    const int streams = static_cast<int>(visible_.size());
     if (content_->hint_serial != hint_serial_)
     {
         hint_serial_ = content_->hint_serial;
@@ -130,7 +172,7 @@ void Detail::update(const hui::InputFrame &input, float dt)
     }
     else
     {
-        const int count = static_cast<int>(content_->streams.size());
+        const int count = static_cast<int>(visible_.size());
         if (input.nav == Direction::up)
             stream_ = std::max(0, stream_ - 1);
         else if (input.nav == Direction::down)
@@ -144,12 +186,13 @@ void Detail::update(const hui::InputFrame &input, float dt)
     const float e = static_cast<float>(episode_) * kEpisodePitch;
     episode_scroll_.reveal(e, e + kEpisodeH, kListViewH, 12.0f);
     const float s = static_cast<float>(stream_) * kStreamPitch;
-    stream_scroll_.reveal(s, s + kStreamH, kListViewH, 12.0f);
+    stream_scroll_.reveal(s, s + kStreamH, kStreamViewH, 12.0f);
     episode_scroll_.update(dt, 18.0f);
     stream_scroll_.update(dt, 18.0f);
     ring_.target(mode_ == Mode::episodes ? episode_rect(episode_, true) : stream_rect(stream_, true));
     ring_.update(dt, 22.0f);
     swap_.update(dt);
+    list_swap_.update(dt);
 }
 
 void Detail::draw_info(hui::gfx::DrawList &list) const
@@ -171,6 +214,13 @@ void Detail::draw_info(hui::gfx::DrawList &list) const
     {
         text(list, display, display.font->fit(line, 66.0f, w), x, baseline, 66.0f, theme::ink, Align::left, -1.4f);
         baseline += 74.0f;
+    }
+    // The episode whose streams are showing: the addon bar has its place in the panel.
+    if (content_->series && mode_ == Mode::streams && !content_->stream_heading.empty())
+    {
+        text(list, env_.fonts.semibold, env_.fonts.semibold.font->fit(content_->stream_heading, 32.0f, w), x,
+             baseline - 6.0f, 32.0f, theme::accent_soft);
+        baseline += 50.0f;
     }
     baseline += 2.0f;
     std::string meta = t.year;
@@ -274,32 +324,20 @@ void Detail::draw_episodes(hui::gfx::DrawList &list) const
 
 void Detail::draw_streams(hui::gfx::DrawList &list) const
 {
-    // The heading, with the way back when this follows an episode.
-    const float hx = kPanel.x + 40.0f;
-    float tx = hx;
-    if (content_->series)
-    {
-        draw_chevron(list, hx + 8.0f, 150.0f, 20.0f, 2, theme::ink_2);
-        tx = hx + 38.0f;
-    }
-    char count[48];
-    std::snprintf(count, sizeof(count), "%zu streams", content_->streams.size());
-    const float cw = env_.fonts.regular.measure(count, 24.0f);
-    text(list, env_.fonts.regular, count, kPanel.x + kPanel.w - 40.0f, 158.0f, 24.0f, theme::ink_3, Align::right);
-    const std::string heading = content_->stream_heading.empty() ? "Streams" : content_->stream_heading;
-    text(list, env_.fonts.semibold, env_.fonts.semibold.font->fit(heading, 32.0f, kPanel.w - 120.0f - cw), tx, 160.0f,
-         32.0f, theme::ink);
+    // The addon bar, like the season bar over the episodes (the episode itself is named on the left).
+    draw_source_tabs(list);
 
-    list.push_clip({kPanel.x, kListTop - 8.0f, kPanel.w, kListViewH + 16.0f});
+    list.push_opacity(tween::smoothstep(list_swap_.progress()));
+    list.push_clip({kPanel.x, kStreamTop - 8.0f, kPanel.w, kStreamViewH + 16.0f});
     const Rect ring = ring_.value();
-    if (!content_->streams.empty())
+    if (!visible_.empty())
         list.glow(ring, 22.0f, 24.0f, theme::accent.with_alpha(0.30f));
-    for (int i = 0; i < static_cast<int>(content_->streams.size()); ++i)
+    for (int i = 0; i < static_cast<int>(visible_.size()); ++i)
     {
         const Rect r = stream_rect(i, false);
         if (r.y > 1080.0f || r.y + r.h < 0.0f)
             continue;
-        const Stream &s = content_->streams[i];
+        const Stream &s = content_->streams[static_cast<std::size_t>(visible_[static_cast<std::size_t>(i)])];
         const bool focused = i == stream_;
         const float enter = tween::stagger(age_, i, 0.04f, 0.4f);
         list.push_opacity(enter);
@@ -325,12 +363,37 @@ void Detail::draw_streams(hui::gfx::DrawList &list) const
             text(list, env_.fonts.regular, s.seeds, right, r.y + 88.0f, 21.0f, theme::ink_3, Align::right);
         list.pop_opacity();
     }
-    if (!content_->streams.empty())
+    if (!visible_.empty())
         list.bordered_rect(ring, 22.0f, Color::rgb(0xffffff, 0.0f), 4.0f, Color::rgb(0xffffff));
     list.pop_clip();
+    list.pop_opacity();
     if (content_->streams.empty())
-        hui::ui::paragraph(list, env_.fonts.regular, content_->streams_status, kPanel.x + 44.0f, kListTop + 56.0f, 26.0f,
+        hui::ui::paragraph(list, env_.fonts.regular, content_->streams_status, kPanel.x + 44.0f, kStreamTop + 56.0f, 26.0f,
                            kPanel.w - 88.0f, 38.0f, theme::ink_3, 5);
+}
+
+void Detail::draw_source_tabs(hui::gfx::DrawList &list) const
+{
+    // Like the season bar: the addon showing ("All" or one addon) and how many streams it has; L1 and R1 turn the pages.
+    const Rect bar{kPanel.x + 28.0f, kTabsTop, kPanel.w - 56.0f, kTabsH};
+    list.rounded_rect(bar, 26.0f, theme::surface);
+    const std::string name = source_.empty() ? std::string("All") : source_;
+    char count[48];
+    std::snprintf(count, sizeof(count), "%zu %s", visible_.size(), visible_.size() == 1 ? "stream" : "streams");
+    const float cw = env_.fonts.regular.measure(count, 24.0f);
+    // A long addon name is cut so it stays between L1 and R1.
+    const std::string label = env_.fonts.semibold.font->fit(name, 30.0f, bar.w - 2.0f * 88.0f - 22.0f - cw);
+    const float sw = env_.fonts.semibold.measure(label, 30.0f);
+    const float start = bar.cx() - (sw + 22.0f + cw) * 0.5f;
+    text(list, env_.fonts.semibold, label, start, bar.cy() + 11.0f, 30.0f, theme::ink);
+    text(list, env_.fonts.regular, count, start + sw + 22.0f, bar.cy() + 10.0f, 24.0f, theme::ink_3);
+    if (!content_->stream_addons.empty())
+    {
+        hui::ui::draw_button(list, env_.fonts, hui::ui::GlyphStyle::dark(), hui::ui::Button::l1, bar.x + 22.0f,
+                             bar.cy(), 40.0f);
+        hui::ui::draw_button(list, env_.fonts, hui::ui::GlyphStyle::dark(), hui::ui::Button::r1, bar.x + bar.w - 66.0f,
+                             bar.cy(), 40.0f);
+    }
 }
 
 void Detail::draw_hints_row(hui::gfx::DrawList &list) const
@@ -352,8 +415,12 @@ void Detail::draw_hints_row(hui::gfx::DrawList &list) const
     {
         const hui::ui::Hint hints[] = {{hui::ui::Button::cross, "Play"},
                                        {hui::ui::Button::square, "Play with server"},
+                                       {hui::ui::Button::l1, "Addon", hui::ui::Button::r1},
                                        {hui::ui::Button::circle, "Back"}};
-        hui::ui::draw_hints(list, env_.fonts, hui::ui::GlyphStyle::dark(), hints, 3, theme::kRight, true, layout);
+        const bool tabs = !content_->stream_addons.empty();
+        const hui::ui::Hint shown[] = {hints[0], hints[1], tabs ? hints[2] : hints[3], hints[3]};
+        hui::ui::draw_hints(list, env_.fonts, hui::ui::GlyphStyle::dark(), shown, tabs ? 4 : 3, theme::kRight, true,
+                            layout);
     }
 }
 
