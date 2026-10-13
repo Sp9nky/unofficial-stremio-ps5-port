@@ -11,6 +11,9 @@
 > **https://discord.gg/fJzFmvFqVf**
 
 > [!IMPORTANT]
+> **Version 1.2 fixes a crash on HLS (`.m3u8`) streams**, such as live streams from addons.
+> See [What's new in 1.2](#whats-new-in-12).
+>
 > **Version 1.1 fixes HDR, Real-Debrid and Torbox**, adds a sign-in screen, profiles and
 > in-app updates. See [What's new in 1.1](#whats-new-in-11).
 >
@@ -59,6 +62,13 @@ watch it, all with the DualSense.
 </table>
 
 The titles and artwork in these pictures are invented (made by `tools/preview`).
+
+## What's new in 1.2
+
+- **A crash on HLS streams is fixed.** Streams that arrive as an HLS playlist (`.m3u8`), such
+  as live broadcasts and recordings from some addons (a Kick addon, for example), made the app
+  close a moment after they started. They play now, live ones and recorded ones, and you can
+  seek in a recording. Reported in [issue #7](https://github.com/Sp9nky/unofficial-stremio-ps5-port/issues/7).
 
 ## What's new in 1.1
 

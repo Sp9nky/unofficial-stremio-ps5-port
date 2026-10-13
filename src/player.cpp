@@ -278,6 +278,11 @@ void Player::demux_run() {
 	av_dict_set(&dict, "rw_timeout", "120000000", 0);
 	av_dict_set(&dict, "tls_verify", "0", 0);
 	av_dict_set(&dict, "seekable", "-1", 0);
+	// HLS (a live stream or a recording from an addon, the server's transcode): the demuxer reuses its previous HTTP
+	// connection for the next playlist or segment by default, which only works for connections FFmpeg opened itself
+	// (libavformat/hls.c open_url_keepalive asserts on the URLContext). Ours come from our own network layer (the
+	// IoHooks below), so every file is opened afresh: without this the app aborted on the second segment.
+	av_dict_set(&dict, "http_persistent", "0", 0);
 	if (!http_ca_bundle().empty()) av_dict_set(&dict, "ca_file", http_ca_bundle().c_str(), 0);
 
 	fmt_ = avformat_alloc_context();
